@@ -96,15 +96,21 @@ class OpendotTUI(App):
         Binding("ctrl+c", "quit", "Quit"),
     ]
 
-    def __init__(self, agent: Agent) -> None:
+    def __init__(self, agent: Agent, policy=None) -> None:
         super().__init__()
         self.agent = agent
         self._turn_worker = None
         self._busy = False
+        self._policy = policy
         # Give the agent a confirm callback that shows a blocking modal. It's
         # invoked from a worker thread (tool runs via asyncio.to_thread), so
         # call_from_thread is the correct, non-deadlocking bridge to the UI.
-        agent.toolbox._confirm = self._confirm_from_thread
+        # A permission policy (--yes / --allow / --deny / OPENDOT.md) can
+        # auto-approve or hard-deny before the modal is ever shown.
+        if policy is not None:
+            agent.toolbox._confirm = policy.make_confirm(self._confirm_from_thread)
+        else:
+            agent.toolbox._confirm = self._confirm_from_thread
 
     def _confirm_from_thread(self, prompt: str) -> bool:
         try:
@@ -950,5 +956,5 @@ class OpendotTUI(App):
         self._refresh_sidebar()
 
 
-def run_tui(agent: Agent) -> None:
-    OpendotTUI(agent).run()
+def run_tui(agent: Agent, policy=None) -> None:
+    OpendotTUI(agent, policy=policy).run()

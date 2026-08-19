@@ -66,6 +66,26 @@ def _confirm(prompt: str) -> bool:
     return ans in {"y", "yes"}
 
 
+def _build_policy(args, workdir: str):
+    """Merge the project's OPENDOT.md policy with the CLI --yes/--allow/--deny."""
+    from opendot.agent.permissions import Policy, load_policy
+
+    cli_policy = Policy(
+        allow=list(getattr(args, "allow", []) or []),
+        deny=list(getattr(args, "deny", []) or []),
+        auto_approve=bool(getattr(args, "yes", False)),
+    )
+    return load_policy(workdir).merged_with(cli_policy)
+
+
+def _make_confirm(args, workdir: str, interactive: bool):
+    """Build the confirm callback: policy-gated, falling back to the interactive
+    prompt (or an auto-decline in one-shot mode) for anything left to ask."""
+    policy = _build_policy(args, workdir)
+    ask = _confirm if interactive else (lambda _p: False)
+    return policy.make_confirm(ask)
+
+
 def _warn_if_missing_key(model: str) -> None:
     """Print a friendly hint if the model's expected API key isn't in the env.
 
@@ -643,6 +663,30 @@ def main() -> None:
         help="Hard token cap for this agent (stops after exceeding). "
         "Also controlled by OPENDOT_MAX_TOKENS.",
     )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Auto-approve actions that would otherwise prompt for confirmation "
+        "(for unattended / CI runs). Reversibility still snapshots everything; "
+        "--deny patterns still block.",
+    )
+    parser.add_argument(
+        "--allow",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Auto-approve actions whose confirm prompt contains PATTERN "
+        "(repeatable, e.g. --allow 'pytest').",
+    )
+    parser.add_argument(
+        "--deny",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Always refuse actions whose confirm prompt contains PATTERN, even "
+        "with --yes (repeatable, e.g. --deny 'git push').",
+    )
     parser.add_argument("--version", action="version", version=f"opendot {__version__}")
 
     sub = parser.add_subparsers(dest="command")
@@ -732,11 +776,12 @@ def main() -> None:
         oneshot = sys.stdin.read().strip() or None
 
     if oneshot:
-        # Non-interactive: can't prompt, so decline irreversible commands by default.
+        # Non-interactive: can't prompt, so decline irreversible commands unless
+        # a policy (--yes / --allow / OPENDOT.md) approves them.
         agent = _build_agent(
             args.model,
             workdir,
-            confirm=lambda _p: False,
+            confirm=_make_confirm(args, workdir, interactive=False),
             api_base=args.api_base,
             max_usd=args.usd,
             max_tokens=args.tokens,
@@ -752,7 +797,7 @@ def main() -> None:
         agent = _build_agent(
             args.model,
             workdir,
-            confirm=_confirm,
+            confirm=_make_confirm(args, workdir, interactive=True),
             api_base=args.api_base,
             max_usd=args.usd,
             max_tokens=args.tokens,
@@ -788,7 +833,7 @@ def main() -> None:
             # paths so a missing key surfaces now, not mid-turn.
             if not args.api_base:
                 _warn_if_missing_key(agent.config.model)
-        run_tui(agent)
+        run_tui(agent, policy=_build_policy(args, workdir))
 
 
 if __name__ == "__main__":
