@@ -125,6 +125,28 @@ token cap is the meaningful one there). The defaults come from
 value is ignored, and unset means unlimited (the default). When a cap is hit the
 run ends with a clear `budget exceeded` / `token limit exceeded` message.
 
+## Unattended runs & permissions
+
+By default opendot confirms every irreversible or workspace-escaping action
+(and one-shot runs decline them, since there's no one to ask). For CI or an
+unattended run, a permission policy lets you decide up front what's allowed:
+
+```bash
+opendot -p "run the test suite and fix failures" --yes         # auto-approve prompts
+opendot -p "..." --yes --deny "git push" --deny "rm -rf"       # but hard-block these
+opendot -p "..." --allow "pytest"                              # approve only these
+```
+
+- `--yes` auto-approves anything that would otherwise prompt. Reversibility is
+  unchanged: every action is still snapshotted and undoable.
+- `--allow PATTERN` / `--deny PATTERN` match a substring of the action (the
+  command or path); both are repeatable.
+- Precedence is **deny > allow > (`--yes` ? approve : ask)** — so you can
+  auto-approve broadly and still guarantee specific things never run.
+
+You can pin the same rules per project in `OPENDOT.md` (see below), so they
+travel with the repo; CLI flags merge on top.
+
 ## Connect MCP servers
 
 opendot is an [MCP](https://modelcontextprotocol.io) client: connect any MCP
@@ -191,11 +213,16 @@ context. You can also control what gets snapshotted with an `opendot` block:
 snapshot: dist
 # never snapshot these:
 skip: data, *.log
+# permission policy (same as --allow/--deny; comma-separated, may contain spaces):
+allow: pytest, ruff
+deny: git push, rm -rf
 ```
 ````
 
 By default opendot skips `.git`, `node_modules`, virtualenvs, and build caches
-when snapshotting — your rules override those in either direction.
+when snapshotting — your rules override those in either direction. The `allow:`
+/ `deny:` lists set the project's permission policy; the `--allow` / `--deny`
+CLI flags merge on top of them.
 
 ## How the reversibility works
 
@@ -203,7 +230,9 @@ when snapshotting — your rules override those in either direction.
   directory into a **content-addressed store** in `~/.opendot` (each unique file
   stored once, so snapshots are cheap).
 - Every action is recorded in an **append-only ledger** you can inspect with
-  `opendot log`.
+  `opendot log`, which shows a timeline with a `▸ you are here` cursor — so you
+  can see at a glance which actions are applied and which have been undone (and
+  are still redoable).
 - `opendot undo` restores the workspace to a chosen point, exactly, and
   `opendot redo` re-applies what you last undid (a wrong undo is itself
   reversible).
@@ -269,9 +298,11 @@ pytest
 ## Status
 
 Early (alpha). The interactive agent, local tools, and the full reversibility
-engine (undo, redo, diff preview) work and are tested. Streaming, slash-commands,
-`OPENDOT.md` rules, per-project session resume, spend/token budgets, MCP and
-Composio connectors, and office (`.xlsx`/`.pptx`/`.docx`) tools are in. A richer
-TUI and more tools are coming.
+engine (undo, redo, diff preview, and a `you are here` timeline) work and are
+tested. Streaming, slash-commands, `OPENDOT.md` rules, per-project session
+resume, spend/token budgets, a permission policy (`--yes` / allow-deny) for
+unattended runs, an end-of-session summary, MCP and Composio connectors, and
+office (`.xlsx`/`.pptx`/`.docx`) tools are in. A richer TUI and more tools are
+coming.
 
 [MIT licensed.](LICENSE)
