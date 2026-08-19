@@ -9,7 +9,7 @@ own rules:
 - ``--allow PATTERN`` / ``--deny PATTERN`` match substrings of the action's
   confirm prompt (which contains the command or path). ``deny`` always wins, so
   you can auto-approve broadly with ``--yes`` yet still hard-block specifics.
-- An ``OPENDOT.md`` ``policy`` block carries the same allow/deny lists for the
+- An ``OPENDOT.md`` ``opendot`` block carries the same allow/deny lists for the
   project, so the rules travel with the repo.
 
 Precedence, most-specific first: deny > allow > (--yes ? approve : ask). A denied

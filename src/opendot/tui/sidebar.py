@@ -105,9 +105,14 @@ class Sidebar(Static):
             t.append("no actions yet\n", style="dim")
         else:
             undone = a.reversibility.redo_available()
-            cursor_after = len(history) - undone  # actions [0:cursor_after] applied
+            cursor_after = max(0, len(history) - undone)  # actions [0:cursor_after] applied
             shown = history[-16:]
             base = len(history) - len(shown)  # absolute index of the first shown row
+            # The cursor may sit above the visible window (older applied actions
+            # scrolled off). Draw it up top then, so it's never lost or mislabeled.
+            if cursor_after <= base:
+                suffix = " (all undone)" if cursor_after == 0 else ""
+                t.append(f"▸ here{suffix}\n", style="bold cyan")
             for offset, e in enumerate(shown):
                 idx = base + offset
                 is_undone = idx >= cursor_after
@@ -123,7 +128,5 @@ class Sidebar(Static):
                     t.append(f"{e.kind[:5]} {detail}\n", style="dim")
                 if idx == cursor_after - 1:
                     t.append("▸ here\n", style="bold cyan")
-            if cursor_after <= base:
-                t.append("▸ here (all undone)\n", style="bold cyan")
         t.append("\nctrl+z undo · ctrl+y redo · ctrl+l log", style="dim italic")
         return t
