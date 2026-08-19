@@ -118,6 +118,11 @@ class Agent:
 
         self.usage = Usage()  # running token/cost totals for the session
 
+        # Mark where the ledger stands at session start, so the end-of-session
+        # summary can report only the actions taken during *this* session (the
+        # ledger itself is append-only and spans every past session).
+        self._session_start_actions = len(self.reversibility.history())
+
         # The main agent can fan out read-only explorer subagents; explorers
         # themselves cannot (no recursive spawning). Read-only toolboxes = explorer.
         self.explorers_enabled = not getattr(self.toolbox, "read_only", False)
@@ -125,6 +130,23 @@ class Agent:
     def reset(self) -> None:
         """Clear the conversation (the /clear context-reset barrier), keeping system."""
         self.messages = self.messages[:1]
+
+    def session_summary(self) -> dict[str, Any]:
+        """A snapshot of what this session spent and did, for an end-of-run card.
+
+        Counts only actions taken since the session started (the ledger persists
+        across sessions), and splits them by whether they're reversible.
+        """
+        actions = self.reversibility.history()[self._session_start_actions :]
+        reversible = sum(1 for a in actions if a.reversible)
+        return {
+            "actions": len(actions),
+            "reversible": reversible,
+            "irreversible": len(actions) - reversible,
+            "cost_usd": self.usage.cost_usd,
+            "total_tokens": self.usage.total_tokens,
+            "calls": len(self.usage.calls),
+        }
 
     def _session_path(self) -> Path:
         from opendot.reversibility.snapshots import project_id_for, store_root

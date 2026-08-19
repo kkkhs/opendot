@@ -379,3 +379,40 @@ def test_no_budget_means_unlimited():
 
     c = AC(model="m", workdir="/tmp")
     assert c.max_usd is None and c.max_tokens is None
+
+
+def test_session_summary_counts_only_this_session(tmp_path):
+    # A ledger entry written before the agent starts must not be counted; only
+    # actions taken during this session appear, split by reversibility.
+    from opendot.reversibility.ledger import LedgerEntry
+    from opendot.reversibility.snapshots import project_id_for
+
+    workdir = str(tmp_path)
+    pid = project_id_for(workdir)
+
+    def _log(id_, reversible):
+        from opendot.reversibility import ledger
+
+        ledger.append(
+            pid,
+            LedgerEntry(
+                id=id_, kind="write", detail="f", snapshot_before="s", reversible=reversible
+            ),
+        )
+
+    _log("000001", True)  # a prior-session action
+
+    a = Agent(AgentConfig(model="m", workdir=workdir))
+    assert a.session_summary()["actions"] == 0  # baseline excludes the prior action
+
+    _log("000002", True)
+    _log("000003", False)
+    a.usage.cost_usd = 0.05
+    a.usage.total_tokens = 2000
+
+    s = a.session_summary()
+    assert s["actions"] == 2
+    assert s["reversible"] == 1
+    assert s["irreversible"] == 1
+    assert s["cost_usd"] == 0.05
+    assert s["total_tokens"] == 2000

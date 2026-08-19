@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 from rich.console import Console
@@ -382,6 +383,34 @@ def _cmd_mcp(args) -> None:
         return
 
 
+def _print_session_summary(agent: Agent, elapsed_s: float) -> None:
+    """End-of-session card: time, spend, and how much of what the agent did is
+    reversible. Skipped when the session did nothing (no actions, no spend)."""
+    s = agent.session_summary()
+    if not s["actions"] and not s["cost_usd"] and not s["total_tokens"]:
+        return
+
+    took = f"{elapsed_s:.0f}s" if elapsed_s >= 1 else f"{elapsed_s * 1000:.0f}ms"
+    tokens = (
+        f"{s['total_tokens'] / 1000:.1f}k" if s["total_tokens"] >= 1000 else str(s["total_tokens"])
+    )
+    line1 = f"{took}  ·  ${s['cost_usd']:.4f}  ·  {tokens} tokens  ·  {s['calls']} call(s)"
+
+    if s["actions"] == 0:
+        line2 = "no files or commands touched"
+    elif s["irreversible"] == 0:
+        line2 = f"{s['actions']} action(s) · [green]all reversible[/green]"
+    else:
+        line2 = (
+            f"{s['actions']} action(s) · {s['reversible']} reversible · "
+            f"[yellow]{s['irreversible']} not undoable[/yellow]"
+        )
+
+    console.print(
+        Panel.fit(f"{line1}\n{line2}", title="session", border_style="dim", title_align="left")
+    )
+
+
 async def _run_turn(agent: Agent, message: str) -> None:
     """Run one turn, streaming events to the console live.
 
@@ -437,12 +466,14 @@ def _interactive(agent: Agent) -> None:
         )
     )
     session: PromptSession = PromptSession(history=InMemoryHistory())
+    started = time.monotonic()
 
     while True:
         try:
             text = session.prompt("\nopendot › ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/dim]")
+            _print_session_summary(agent, time.monotonic() - started)
             return
 
         if not text:
@@ -450,6 +481,7 @@ def _interactive(agent: Agent) -> None:
         low = text.lower()
         if low in {"exit", "/exit", "/quit", "quit"}:
             console.print("[dim]bye[/dim]")
+            _print_session_summary(agent, time.monotonic() - started)
             return
         if low == "/help":
             console.print(SLASH_HELP)
@@ -691,7 +723,9 @@ def main() -> None:
             agent.load_session()
             if not args.api_base:
                 _warn_if_missing_key(agent.config.model)
+        started = time.monotonic()
         asyncio.run(_run_turn(agent, oneshot))
+        _print_session_summary(agent, time.monotonic() - started)
     elif args.repl:
         agent = _build_agent(
             args.model,
