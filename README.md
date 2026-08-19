@@ -60,11 +60,15 @@ opendot --model claude-opus-4-5      # launch with a specific model (see below)
 opendot log                          # audit: what has the agent done here?
 opendot undo                         # revert the last action
 opendot undo 000004                  # restore the workspace to before action #4
+opendot redo                         # re-apply the last thing you undid
+opendot diff 000004                  # dry-run: preview what undo-ing action #4 would change
+opendot resume                       # continue this project's previous session
 ```
 
 Inside the chat, slash-commands: `/model` (searchable model picker),
-`/provider` (connect a provider + paste an API key), `/log`, `/undo`, `/clear`,
-`/compact`, `/help`.
+`/provider` (connect a provider + paste an API key), `/mcp`, `/composio`,
+`/log`, `/undo`, `/redo`, `/diff`, `/trace` (per-model-call cost + timing),
+`/clear`, `/compact`, `/help`.
 
 ## Any model
 
@@ -101,6 +105,25 @@ provider on launch — e.g. with only `DEEPSEEK_API_KEY` set, a bare `opendot`
 uses `deepseek/deepseek-chat`. If **no** provider key is found, opendot starts
 fine but the first message shows a hint to set a key or run `/provider` (rather
 than a raw provider error). `ollama/*` models need no key — just a local Ollama.
+
+## Budget cap
+
+Same idea as reversibility, one axis over: reversibility bounds the *damage* a
+run can do, a budget bounds the *spend*. Set a ceiling and opendot stops the run
+the moment accumulated cost or tokens cross it, instead of running to the step
+limit.
+
+```bash
+opendot -p "refactor this module" --usd 0.50    # stop at 50 cents of spend
+opendot -p "..." --tokens 100000                # stop at 100k tokens
+```
+
+Use `--usd` when the model has known pricing; use `--tokens` for a self-hosted
+`--api-base` model whose rates aren't known (a local model prices at $0, so a
+token cap is the meaningful one there). The defaults come from
+`OPENDOT_MAX_USD` / `OPENDOT_MAX_TOKENS` if set; an invalid or non-positive
+value is ignored, and unset means unlimited (the default). When a cap is hit the
+run ends with a clear `budget exceeded` / `token limit exceeded` message.
 
 ## Connect MCP servers
 
@@ -181,7 +204,13 @@ when snapshotting — your rules override those in either direction.
   stored once, so snapshots are cheap).
 - Every action is recorded in an **append-only ledger** you can inspect with
   `opendot log`.
-- `opendot undo` restores the workspace to a chosen point, exactly.
+- `opendot undo` restores the workspace to a chosen point, exactly, and
+  `opendot redo` re-applies what you last undid (a wrong undo is itself
+  reversible).
+- `opendot diff` is a dry run: it shows exactly which files an undo or restore
+  would change, before you commit to it.
+- Sessions persist per project, so `opendot resume` picks up the previous
+  conversation and its ledger where you left off.
 - A conservative **classifier** decides which shell commands are workspace-
   contained (auto-run, undoable) vs. escaping (confirmed first, marked
   irreversible). When unsure, it asks.
@@ -210,6 +239,20 @@ To exclude paths from snapshotting permanently, use the `skip:` rule in
 context. Set `OPENDOT_MAX_TOOL_OUTPUT` to change the per-tool character cap
 (default `30000`); non-integer or non-positive values keep the default.
 
+## Office files
+
+With the optional `office` extra installed, the agent can read and edit
+spreadsheets and documents directly:
+
+```bash
+uv tool install "opendot[office]"   # or: pip install "opendot[office]"
+```
+
+This adds tools for `.xlsx` (read a sheet, edit a cell, append rows, create a
+sheet), `.pptx` (read slides), and `.docx` (read paragraphs). Spreadsheet edits
+go through the same snapshot-first path as any other file write, so they're
+undoable like everything else.
+
 ## Contributing
 
 Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and
@@ -226,7 +269,9 @@ pytest
 ## Status
 
 Early (alpha). The interactive agent, local tools, and the full reversibility
-engine work and are tested. Streaming, slash-commands, and `OPENDOT.md` rules
-are in. A richer TUI and more tools are coming.
+engine (undo, redo, diff preview) work and are tested. Streaming, slash-commands,
+`OPENDOT.md` rules, per-project session resume, spend/token budgets, MCP and
+Composio connectors, and office (`.xlsx`/`.pptx`/`.docx`) tools are in. A richer
+TUI and more tools are coming.
 
 [MIT licensed.](LICENSE)
