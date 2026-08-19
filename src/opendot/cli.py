@@ -157,17 +157,39 @@ def _cmd_log(workdir: str, clear: bool = False) -> None:
     if not entries:
         console.print("[dim]no actions recorded yet[/dim]")
         return
+
+    # Timeline: actions oldest→newest, with a cursor marking where the workspace
+    # currently sits. `undone` trailing actions have been reverted (undo) and are
+    # redoable; they render dimmed below the cursor.
+    undone = rev.redo_available()
+    cursor_after = len(entries) - undone  # actions [0:cursor_after] are applied
+
     console.print("[bold]opendot action history[/bold] (most recent last)\n")
-    for e in entries:
-        mark = "[green]↺[/green]" if e.reversible else "[red]✗ irreversible[/red]"
+    for i, e in enumerate(entries):
+        is_undone = i >= cursor_after
         detail = e.detail if len(e.detail) < 70 else e.detail[:67] + "..."
-        console.print(f"  {e.id}  {mark}  [cyan]{e.kind}[/cyan]  {detail}")
-        if e.note:
-            console.print(f"        [dim]{e.note}[/dim]")
-        if e.model:
-            params = "".join(f" {k}={v}" for k, v in e.params.items())
-            console.print(f"        [dim]model: {e.model}{params}[/dim]")
-    console.print("\n[dim]opendot undo           revert the last action[/dim]")
+        if is_undone:
+            console.print(f"  [dim]{e.id}  ↶ undone  {e.kind}  {detail}[/dim]", highlight=False)
+        else:
+            mark = "[green]↺[/green]" if e.reversible else "[red]✗ irreversible[/red]"
+            console.print(f"  {e.id}  {mark}  [cyan]{e.kind}[/cyan]  {detail}")
+            if e.note:
+                console.print(f"        [dim]{e.note}[/dim]")
+            if e.model:
+                params = "".join(f" {k}={v}" for k, v in e.params.items())
+                console.print(f"        [dim]model: {e.model}{params}[/dim]")
+        # Draw the cursor right after the last applied action.
+        if i == cursor_after - 1:
+            console.print("  [bold cyan]▸ you are here[/bold cyan]")
+
+    if cursor_after == 0:
+        console.print("  [bold cyan]▸ you are here[/bold cyan] [dim](everything undone)[/dim]")
+
+    console.print("\n[dim]opendot undo           revert the last applied action[/dim]")
+    if undone:
+        console.print(
+            f"[dim]opendot redo           re-apply the next of {undone} undone action(s)[/dim]"
+        )
     console.print("[dim]opendot undo <id>      restore the workspace to before that action[/dim]")
 
 
