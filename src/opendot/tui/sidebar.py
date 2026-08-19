@@ -104,11 +104,29 @@ class Sidebar(Static):
         if not history:
             t.append("no actions yet\n", style="dim")
         else:
-            for e in history[-16:]:
-                mark, style = ("↺", "green") if e.reversible else ("✗", "red")
-                detail = e.detail.rsplit("/", 1)[-1][:20]
-                t.append("• ", style="dim")
-                t.append(f"{mark} ", style=style)
-                t.append(f"{e.kind[:5]} {detail}\n", style="dim")
-        t.append("\nctrl+z undo · ctrl+l log", style="dim italic")
+            undone = a.reversibility.redo_available()
+            cursor_after = max(0, len(history) - undone)  # actions [0:cursor_after] applied
+            shown = history[-16:]
+            base = len(history) - len(shown)  # absolute index of the first shown row
+            # The cursor may sit above the visible window (older applied actions
+            # scrolled off). Draw it up top then, so it's never lost or mislabeled.
+            if cursor_after <= base:
+                suffix = " (all undone)" if cursor_after == 0 else ""
+                t.append(f"▸ here{suffix}\n", style="bold cyan")
+            for offset, e in enumerate(shown):
+                idx = base + offset
+                is_undone = idx >= cursor_after
+                if is_undone:
+                    detail = e.detail.rsplit("/", 1)[-1][:20]
+                    t.append("• ", style="dim")
+                    t.append(f"↶ {e.kind[:5]} {detail}\n", style="dim strike")
+                else:
+                    mark, style = ("↺", "green") if e.reversible else ("✗", "red")
+                    detail = e.detail.rsplit("/", 1)[-1][:20]
+                    t.append("• ", style="dim")
+                    t.append(f"{mark} ", style=style)
+                    t.append(f"{e.kind[:5]} {detail}\n", style="dim")
+                if idx == cursor_after - 1:
+                    t.append("▸ here\n", style="bold cyan")
+        t.append("\nctrl+z undo · ctrl+y redo · ctrl+l log", style="dim italic")
         return t

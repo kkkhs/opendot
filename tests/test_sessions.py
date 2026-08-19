@@ -89,7 +89,7 @@ def test_resume_command_loads_before_starting_ui(tmp_path, monkeypatch):
     started = []
     monkeypatch.setattr(sys, "stdin", TtyStdin())
     monkeypatch.setattr(sys, "argv", ["opendot", "-C", str(workdir), "resume"])
-    monkeypatch.setattr("opendot.tui.run_tui", started.append)
+    monkeypatch.setattr("opendot.tui.run_tui", lambda agent, **kw: started.append(agent))
 
     cli.main()
 

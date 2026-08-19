@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 from rich.console import Console
@@ -63,6 +64,26 @@ def _confirm(prompt: str) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return ans in {"y", "yes"}
+
+
+def _build_policy(args, workdir: str):
+    """Merge the project's OPENDOT.md policy with the CLI --yes/--allow/--deny."""
+    from opendot.agent.permissions import Policy, load_policy
+
+    cli_policy = Policy(
+        allow=list(getattr(args, "allow", []) or []),
+        deny=list(getattr(args, "deny", []) or []),
+        auto_approve=bool(getattr(args, "yes", False)),
+    )
+    return load_policy(workdir).merged_with(cli_policy)
+
+
+def _make_confirm(args, workdir: str, interactive: bool):
+    """Build the confirm callback: policy-gated, falling back to the interactive
+    prompt (or an auto-decline in one-shot mode) for anything left to ask."""
+    policy = _build_policy(args, workdir)
+    ask = _confirm if interactive else (lambda _p: False)
+    return policy.make_confirm(ask)
 
 
 def _warn_if_missing_key(model: str) -> None:
@@ -156,17 +177,39 @@ def _cmd_log(workdir: str, clear: bool = False) -> None:
     if not entries:
         console.print("[dim]no actions recorded yet[/dim]")
         return
+
+    # Timeline: actions oldest→newest, with a cursor marking where the workspace
+    # currently sits. `undone` trailing actions have been reverted (undo) and are
+    # redoable; they render dimmed below the cursor.
+    undone = rev.redo_available()
+    cursor_after = len(entries) - undone  # actions [0:cursor_after] are applied
+
     console.print("[bold]opendot action history[/bold] (most recent last)\n")
-    for e in entries:
-        mark = "[green]↺[/green]" if e.reversible else "[red]✗ irreversible[/red]"
+    for i, e in enumerate(entries):
+        is_undone = i >= cursor_after
         detail = e.detail if len(e.detail) < 70 else e.detail[:67] + "..."
-        console.print(f"  {e.id}  {mark}  [cyan]{e.kind}[/cyan]  {detail}")
-        if e.note:
-            console.print(f"        [dim]{e.note}[/dim]")
-        if e.model:
-            params = "".join(f" {k}={v}" for k, v in e.params.items())
-            console.print(f"        [dim]model: {e.model}{params}[/dim]")
-    console.print("\n[dim]opendot undo           revert the last action[/dim]")
+        if is_undone:
+            console.print(f"  [dim]{e.id}  ↶ undone  {e.kind}  {detail}[/dim]", highlight=False)
+        else:
+            mark = "[green]↺[/green]" if e.reversible else "[red]✗ irreversible[/red]"
+            console.print(f"  {e.id}  {mark}  [cyan]{e.kind}[/cyan]  {detail}")
+            if e.note:
+                console.print(f"        [dim]{e.note}[/dim]")
+            if e.model:
+                params = "".join(f" {k}={v}" for k, v in e.params.items())
+                console.print(f"        [dim]model: {e.model}{params}[/dim]")
+        # Draw the cursor right after the last applied action.
+        if i == cursor_after - 1:
+            console.print("  [bold cyan]▸ you are here[/bold cyan]")
+
+    if cursor_after == 0:
+        console.print("  [bold cyan]▸ you are here[/bold cyan] [dim](everything undone)[/dim]")
+
+    console.print("\n[dim]opendot undo           revert the last applied action[/dim]")
+    if undone:
+        console.print(
+            f"[dim]opendot redo           re-apply the next of {undone} undone action(s)[/dim]"
+        )
     console.print("[dim]opendot undo <id>      restore the workspace to before that action[/dim]")
 
 
@@ -382,6 +425,34 @@ def _cmd_mcp(args) -> None:
         return
 
 
+def _print_session_summary(agent: Agent, elapsed_s: float) -> None:
+    """End-of-session card: time, spend, and how much of what the agent did is
+    reversible. Skipped when the session did nothing (no actions, no spend)."""
+    s = agent.session_summary()
+    if not s["actions"] and not s["cost_usd"] and not s["total_tokens"]:
+        return
+
+    took = f"{elapsed_s:.0f}s" if elapsed_s >= 1 else f"{elapsed_s * 1000:.0f}ms"
+    tokens = (
+        f"{s['total_tokens'] / 1000:.1f}k" if s["total_tokens"] >= 1000 else str(s["total_tokens"])
+    )
+    line1 = f"{took}  ·  ${s['cost_usd']:.4f}  ·  {tokens} tokens  ·  {s['calls']} call(s)"
+
+    if s["actions"] == 0:
+        line2 = "no files or commands touched"
+    elif s["irreversible"] == 0:
+        line2 = f"{s['actions']} action(s) · [green]all reversible[/green]"
+    else:
+        line2 = (
+            f"{s['actions']} action(s) · {s['reversible']} reversible · "
+            f"[yellow]{s['irreversible']} not undoable[/yellow]"
+        )
+
+    console.print(
+        Panel.fit(f"{line1}\n{line2}", title="session", border_style="dim", title_align="left")
+    )
+
+
 async def _run_turn(agent: Agent, message: str) -> None:
     """Run one turn, streaming events to the console live.
 
@@ -437,12 +508,14 @@ def _interactive(agent: Agent) -> None:
         )
     )
     session: PromptSession = PromptSession(history=InMemoryHistory())
+    started = time.monotonic()
 
     while True:
         try:
             text = session.prompt("\nopendot › ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/dim]")
+            _print_session_summary(agent, time.monotonic() - started)
             return
 
         if not text:
@@ -450,6 +523,7 @@ def _interactive(agent: Agent) -> None:
         low = text.lower()
         if low in {"exit", "/exit", "/quit", "quit"}:
             console.print("[dim]bye[/dim]")
+            _print_session_summary(agent, time.monotonic() - started)
             return
         if low == "/help":
             console.print(SLASH_HELP)
@@ -589,6 +663,30 @@ def main() -> None:
         help="Hard token cap for this agent (stops after exceeding). "
         "Also controlled by OPENDOT_MAX_TOKENS.",
     )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Auto-approve actions that would otherwise prompt for confirmation "
+        "(for unattended / CI runs). Reversibility still snapshots everything; "
+        "--deny patterns still block.",
+    )
+    parser.add_argument(
+        "--allow",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Auto-approve actions whose confirm prompt contains PATTERN "
+        "(repeatable, e.g. --allow 'pytest').",
+    )
+    parser.add_argument(
+        "--deny",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Always refuse actions whose confirm prompt contains PATTERN, even "
+        "with --yes (repeatable, e.g. --deny 'git push').",
+    )
     parser.add_argument("--version", action="version", version=f"opendot {__version__}")
 
     sub = parser.add_subparsers(dest="command")
@@ -678,11 +776,12 @@ def main() -> None:
         oneshot = sys.stdin.read().strip() or None
 
     if oneshot:
-        # Non-interactive: can't prompt, so decline irreversible commands by default.
+        # Non-interactive: can't prompt, so decline irreversible commands unless
+        # a policy (--yes / --allow / OPENDOT.md) approves them.
         agent = _build_agent(
             args.model,
             workdir,
-            confirm=lambda _p: False,
+            confirm=_make_confirm(args, workdir, interactive=False),
             api_base=args.api_base,
             max_usd=args.usd,
             max_tokens=args.tokens,
@@ -691,12 +790,14 @@ def main() -> None:
             agent.load_session()
             if not args.api_base:
                 _warn_if_missing_key(agent.config.model)
+        started = time.monotonic()
         asyncio.run(_run_turn(agent, oneshot))
+        _print_session_summary(agent, time.monotonic() - started)
     elif args.repl:
         agent = _build_agent(
             args.model,
             workdir,
-            confirm=_confirm,
+            confirm=_make_confirm(args, workdir, interactive=True),
             api_base=args.api_base,
             max_usd=args.usd,
             max_tokens=args.tokens,
@@ -732,7 +833,7 @@ def main() -> None:
             # paths so a missing key surfaces now, not mid-turn.
             if not args.api_base:
                 _warn_if_missing_key(agent.config.model)
-        run_tui(agent)
+        run_tui(agent, policy=_build_policy(args, workdir))
 
 
 if __name__ == "__main__":
