@@ -674,3 +674,90 @@ def test_run_shell_positive_timeout_argument_still_enforced(tmp_path):
     tb, wd, _ = _tb(tmp_path)
     out = tb.call("run_shell", {"command": "sleep 2", "timeout": 1})
     assert "timed out after 1s" in out
+
+
+def test_write_file_does_not_follow_symlink_out_of_workspace(tmp_path):
+    """In-workspace writes use open-time containment (O_NOFOLLOW), so if the
+    target path is a symlink pointing outside — including one swapped in after a
+    path check (TOCTOU) — the write does not follow it. The symlink is replaced
+    by a real in-workspace file instead. (#130)"""
+    tb, wd, _ = _tb(tmp_path)
+    outside = tmp_path / "outside_secret"
+    outside.write_text("ORIGINAL", encoding="utf-8")
+    target = wd / "notes.txt"
+    os.symlink(outside, target)
+
+    tb._safe_write_within_workspace(target, "NEW")
+
+    assert outside.read_text() == "ORIGINAL"  # never written through the symlink
+    assert not target.is_symlink()  # replaced by a real file
+    assert target.read_text() == "NEW"
+
+
+def test_write_file_normal_in_workspace_still_works(tmp_path):
+    tb, wd, _ = _tb(tmp_path)
+    out = tb.call("write_file", {"path": "sub/dir/file.txt", "content": "hi"})
+    assert "created" in out
+    assert (wd / "sub" / "dir" / "file.txt").read_text() == "hi"
+
+
+def test_openat2_tier_used_when_supported(tmp_path):
+    """On a Linux kernel with openat2, the strongest containment tier does a
+    normal write successfully (feature-detected; skipped elsewhere)."""
+    from opendot.tools.local import _openat2_supported, _write_via_openat2
+
+    if not _openat2_supported():
+        pytest.skip("openat2 not available on this platform")
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    p = wd / "file.txt"
+    assert _write_via_openat2(str(wd), p, b"hello") is True
+    assert p.read_text() == "hello"
+
+
+def test_openat2_refuses_symlink_escape_when_supported(tmp_path):
+    """openat2 with RESOLVE_NO_SYMLINKS returns False for a symlinked target
+    (escape refused), so the caller falls back and neutralises it."""
+    from opendot.tools.local import _openat2_supported, _write_via_openat2
+
+    if not _openat2_supported():
+        pytest.skip("openat2 not available on this platform")
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("ORIGINAL", encoding="utf-8")
+    link = wd / "link.txt"
+    os.symlink(outside, link)
+    assert _write_via_openat2(str(wd), link, b"NEW") is False
+    assert outside.read_text() == "ORIGINAL"
+
+
+def test_write_refuses_intermediate_symlink_escape(tmp_path):
+    """An intermediate path component that is a symlink pointing outside the
+    workspace must not be followed — the write stays inside, the symlinked dir is
+    replaced by a real one. Closes the intermediate-symlink race on every tier
+    (not just Linux openat2). (#130)"""
+    tb, wd, _ = _tb(tmp_path)
+    outside_dir = tmp_path / "attacker_dir"
+    outside_dir.mkdir()
+    (wd / "sub").symlink_to(outside_dir)  # wd/sub -> outside
+
+    tb._safe_write_within_workspace(wd / "sub" / "data.txt", "NEW")
+
+    assert not (outside_dir / "data.txt").exists()  # never escaped
+    assert not (wd / "sub").is_symlink()  # symlinked component replaced by real dir
+    assert (wd / "sub" / "data.txt").read_text() == "NEW"
+
+
+def test_plain_verified_refuses_intermediate_symlink(tmp_path):
+    """The dir_fd-less fallback (Windows path) also refuses an intermediate
+    symlink escape, not just the POSIX fd-walk."""
+    tb, wd, _ = _tb(tmp_path)
+    outside_dir = tmp_path / "attacker_dir2"
+    outside_dir.mkdir()
+    (wd / "sub").symlink_to(outside_dir)
+
+    tb._write_plain_verified(wd / "sub" / "data.txt", b"NEW")
+
+    assert not (outside_dir / "data.txt").exists()
+    assert (wd / "sub" / "data.txt").read_text() == "NEW"
