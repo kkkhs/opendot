@@ -10,12 +10,135 @@ becomes the tool result fed back to the model.
 from __future__ import annotations
 
 import difflib
+import errno
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+# --- Linux openat2 containment (strongest tier of _safe_write_within_workspace) --
+#
+# openat2(2) opens a path relative to a directory fd with resolution flags the
+# kernel enforces atomically. RESOLVE_BENEATH forbids escaping the dir_fd (via
+# ..  or an absolute path) and RESOLVE_NO_SYMLINKS forbids following any symlink
+# in the path — closing the TOCTOU races a userspace path check cannot. It's
+# Linux-only and not in the stdlib, so it's bound via ctypes and feature-detected
+# at runtime; every other platform uses the openat/O_NOFOLLOW + verify fallback.
+
+_RESOLVE_NO_SYMLINKS = 0x04
+_RESOLVE_BENEATH = 0x08
+# openat2 syscall number is stable on the common 64-bit arches (x86-64, arm64).
+_SYS_openat2 = (
+    {"x86_64": 437, "aarch64": 437, "arm64": 437}.get(os.uname().machine)
+    if (sys.platform.startswith("linux") and hasattr(os, "uname"))
+    else None
+)
+
+
+_openat2_probe: bool | None = None
+
+
+def _openat2_supported() -> bool:
+    """True only if the running kernel actually has openat2 (>= 5.6), not just if
+    the syscall number is known — kernels < 5.6 return ENOSYS. Probed once (with a
+    deliberately bad fd so the probe never touches the filesystem) and cached."""
+    global _openat2_probe
+    if _SYS_openat2 is None:
+        return False
+    if _openat2_probe is not None:
+        return _openat2_probe
+    import ctypes
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+
+        class _How(ctypes.Structure):
+            _fields_ = [
+                ("flags", ctypes.c_uint64),
+                ("mode", ctypes.c_uint64),
+                ("resolve", ctypes.c_uint64),
+            ]
+
+        how = _How(flags=os.O_RDONLY, mode=0, resolve=0)
+        # Bad dir_fd (-1) => the syscall returns EBADF if openat2 exists, ENOSYS
+        # if the kernel doesn't implement it. Either way nothing is opened.
+        libc.syscall(
+            ctypes.c_long(_SYS_openat2),
+            ctypes.c_int(-1),
+            ctypes.c_char_p(b"."),
+            ctypes.byref(how),
+            ctypes.c_size_t(ctypes.sizeof(how)),
+        )
+        _openat2_probe = ctypes.get_errno() != errno.ENOSYS
+    except Exception:  # noqa: BLE001 - any failure => treat as unsupported
+        _openat2_probe = False
+    return _openat2_probe
+
+
+def _write_via_openat2(workdir, p: Path, data: bytes) -> bool:
+    """Write ``data`` to ``p`` using Linux openat2 with RESOLVE_BENEATH |
+    RESOLVE_NO_SYMLINKS, anchored at ``workdir``. Returns True on success, False
+    if openat2 isn't available/usable (caller then uses the portable fallback).
+
+    A path that escapes the workspace (symlink or ..) makes openat2 fail, so the
+    write simply doesn't happen through it — the caller's fallback then replaces
+    the offending entry with a real in-workspace file.
+    """
+    if not _openat2_supported():
+        return False
+    import ctypes
+
+    # Lexical relative path — NOT p.resolve(), which would dereference a symlinked
+    # component in userspace before openat2 sees it, defeating RESOLVE_NO_SYMLINKS.
+    # openat2 enforces containment itself and refuses symlinks atomically.
+    wd = Path(workdir).resolve()
+    cand = p if p.is_absolute() else wd / p
+    cand = Path(os.path.normpath(str(cand)))
+    try:
+        rel = str(cand.relative_to(wd))
+    except ValueError:
+        return False  # not lexically under the workspace; let the caller handle it
+    if rel == "." or rel.startswith(".."):
+        return False
+
+    class _OpenHow(ctypes.Structure):
+        _fields_ = [
+            ("flags", ctypes.c_uint64),
+            ("mode", ctypes.c_uint64),
+            ("resolve", ctypes.c_uint64),
+        ]
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        dir_fd = os.open(str(Path(workdir).resolve()), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        how = _OpenHow(
+            flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            mode=0o644,
+            resolve=_RESOLVE_BENEATH | _RESOLVE_NO_SYMLINKS,
+        )
+        fd = libc.syscall(
+            ctypes.c_long(_SYS_openat2),
+            ctypes.c_int(dir_fd),
+            ctypes.c_char_p(rel.encode()),
+            ctypes.byref(how),
+            ctypes.c_size_t(ctypes.sizeof(how)),
+        )
+        if fd < 0:
+            # ELOOP/EXDEV/etc: escape refused, or ENOSYS on a kernel < 5.6.
+            return False
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        os.close(dir_fd)
 
 
 def _max_output() -> int:
@@ -197,6 +320,163 @@ class Toolbox:
         except ValueError:
             return True
 
+    def _safe_write_within_workspace(self, p: Path, content: str) -> None:
+        """Write ``content`` to ``p`` (inside the workspace) with the strongest
+        open-time containment the OS offers, so a symlinked / swapped path
+        component can't redirect the write outside the snapshot boundary (the
+        TOCTOU cases a text-level path check can't close).
+
+        Behaviour is consistent across platforms: if any path component is a
+        symlink or would escape the workspace, the write does not follow it — the
+        offending entry is removed and a real in-workspace file is created in its
+        place. The *mechanism* differs by what the platform provides:
+
+        - Linux with ``openat2`` -> ``RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS``:
+          the kernel refuses any symlink or ``..`` escape atomically (strongest).
+        - Any POSIX with ``dir_fd`` (macOS/BSD, older Linux) -> a component-by-
+          component ``openat`` walk with ``O_NOFOLLOW``, so *no* intermediate
+          symlink is ever followed either — the same containment as openat2,
+          built from openat primitives (race-free per component).
+        - Windows / no ``dir_fd`` -> rebuild each path component as a real dir
+          (replacing an escaping symlink), then write.
+        """
+        data = content.encode("utf-8")
+
+        # Tier 1: Linux openat2 with RESOLVE_BENEATH (atomic, race-free).
+        if _write_via_openat2(self.workdir, p, data):
+            return
+
+        # Tier 2: component-by-component openat + O_NOFOLLOW walk. Closes the
+        # intermediate-symlink race too, on any platform with dir_fd support.
+        if os.open in getattr(os, "supports_dir_fd", set()) and hasattr(os, "O_NOFOLLOW"):
+            if self._write_via_fd_walk(p, data):
+                return
+
+        # Tier 3: no dir_fd (e.g. Windows). Neutralise an escaping symlink, write,
+        # then verify the bytes landed inside the workspace.
+        self._write_plain_verified(p, data)
+
+    def _rel_parts(self, p: Path) -> list[str] | None:
+        """Lexical path components of ``p`` relative to the workspace, or None if
+        ``p`` is not lexically under it or contains a ``..`` segment.
+
+        Deliberately does NOT call ``resolve()`` — resolving would follow a
+        symlinked component and defeat the fd-walk, whose whole job is to refuse
+        exactly those. The walk enforces containment; this only supplies the
+        literal component names to walk.
+        """
+        # Make the candidate absolute against the (already-resolved) workdir and
+        # normalise lexically — NOT resolve(), which would follow a symlinked
+        # component and defeat the fd-walk. The fd-walk enforces containment; this
+        # just supplies the literal component names, anchored at self.workdir.
+        cand = Path(p)
+        if not cand.is_absolute():
+            cand = self.workdir / cand
+        cand = Path(os.path.normpath(str(cand)))
+        try:
+            rel = cand.relative_to(self.workdir)
+        except ValueError:
+            return None
+        parts = list(rel.parts)
+        if not parts or any(part == ".." for part in parts):
+            return None
+        return parts
+
+    def _write_via_fd_walk(self, p: Path, data: bytes) -> bool:
+        """Open every path component under the workspace with openat+O_NOFOLLOW,
+        so no symlink at *any* level is followed. Creates missing intermediate
+        dirs as real dirs. Returns True on success, False to fall through.
+
+        Anchoring each open to the previous component's fd (not a re-resolved
+        string) is what makes this race-free per component: a swap after we've
+        opened a dir fd can't change what that fd points at.
+        """
+        parts = self._rel_parts(p)
+        if not parts:
+            return False
+        nofollow = os.O_NOFOLLOW
+        wd_fd = None
+        cur_fd = None
+        try:
+            wd_fd = os.open(str(self.workdir), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            cur_fd = wd_fd
+            # Walk/create intermediate directories, each O_NOFOLLOW-checked.
+            for comp in parts[:-1]:
+                try:
+                    nxt = os.open(
+                        comp, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow, dir_fd=cur_fd
+                    )
+                except FileNotFoundError:
+                    os.mkdir(comp, 0o755, dir_fd=cur_fd)
+                    nxt = os.open(
+                        comp, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow, dir_fd=cur_fd
+                    )
+                except OSError as exc:
+                    # ELOOP => an intermediate component is a symlink: refuse.
+                    if getattr(exc, "errno", None) in (errno.ELOOP, errno.ENOTDIR):
+                        return False
+                    raise
+                if cur_fd != wd_fd:
+                    os.close(cur_fd)
+                cur_fd = nxt
+            # Open (or replace) the final component as a real file.
+            name = parts[-1]
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | nofollow
+            try:
+                fd = os.open(name, flags, 0o644, dir_fd=cur_fd)
+            except OSError as exc:
+                if getattr(exc, "errno", None) == errno.ELOOP:
+                    os.unlink(name, dir_fd=cur_fd)  # final component was a symlink
+                    fd = os.open(name, flags, 0o644, dir_fd=cur_fd)
+                else:
+                    return False
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            return True
+        except OSError:
+            return False
+        finally:
+            if cur_fd is not None and cur_fd != wd_fd:
+                os.close(cur_fd)
+            if wd_fd is not None:
+                os.close(wd_fd)
+
+    def _write_plain_verified(self, p: Path, data: bytes) -> None:
+        """Last-resort write for platforms without dir_fd (e.g. Windows).
+
+        Rebuilds every path component from the workspace root down as a REAL
+        directory — replacing any symlinked component (which could redirect the
+        write outside) with a real dir — then writes the file. This mirrors the
+        fd-walk's containment lexically, so an intermediate-symlink escape is
+        neutralised here too, not just on POSIX.
+        """
+        parts = self._rel_parts(p)
+        if parts is None:
+            # Not lexically under the workspace: refuse (raise so write_file
+            # surfaces an error rather than falsely reporting success).
+            raise OSError(f"refused: {p} is not inside the workspace")
+        cur = self.workdir
+        for comp in parts[:-1]:
+            cur = cur / comp
+            if cur.is_symlink():
+                cur.unlink()  # replace an escaping symlinked dir with a real one
+            if not cur.exists():
+                cur.mkdir(mode=0o755)
+            elif not cur.is_dir():
+                raise OSError(f"refused: {cur} is not a directory")
+        target = cur / parts[-1]
+        if target.is_symlink():
+            target.unlink()  # never write through a symlinked final component
+        target.write_bytes(data)
+        # Belt-and-suspenders: confirm the bytes actually landed inside the
+        # workspace. The component rebuild above should guarantee it, but if a
+        # concurrent swap slipped through, refuse loudly rather than report a
+        # false success (write_file turns this into an error).
+        try:
+            target.resolve().relative_to(self.workdir)
+        except ValueError:
+            raise OSError(f"refused: {target} escaped the workspace") from None
+
     def _is_ignored(self, p: Path) -> bool:
         return any(part in self._IGNORE for part in p.parts)
 
@@ -343,8 +623,15 @@ class Toolbox:
                     note="outside the workspace — not undoable" if outside else "",
                 )
             try:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(content, encoding="utf-8")
+                if outside:
+                    # Already confirmed + recorded irreversible above; a plain
+                    # write is fine (containment doesn't apply outside the workspace).
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(content, encoding="utf-8")
+                else:
+                    # In-workspace: open-time containment so a symlinked target
+                    # can't redirect the write outside the snapshot boundary.
+                    self._safe_write_within_workspace(p, content)
             except Exception as exc:  # noqa: BLE001
                 return f"error writing {p}: {exc}"
             rel = self._rel(p)
