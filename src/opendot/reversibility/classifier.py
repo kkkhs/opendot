@@ -211,6 +211,15 @@ def _split_segments(command: str) -> list[str]:
     quote: str | None = None
     while i < len(command):
         c = command[i]
+        # A backslash escapes the next character (outside single quotes, where the
+        # shell treats backslash literally). Consume both so an escaped quote
+        # (\") can't open a fake quoted span and swallow a following operator,
+        # and an escaped operator (\&) isn't treated as a split point.
+        if c == "\\" and quote != "'" and i + 1 < len(command):
+            buf.append(c)
+            buf.append(command[i + 1])
+            i += 2
+            continue
         if quote:
             buf.append(c)
             if c == quote:

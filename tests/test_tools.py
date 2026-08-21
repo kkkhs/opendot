@@ -761,3 +761,11 @@ def test_plain_verified_refuses_intermediate_symlink(tmp_path):
 
     assert not (outside_dir / "data.txt").exists()
     assert (wd / "sub" / "data.txt").read_text() == "NEW"
+
+
+def test_write_outside_workspace_via_plain_path_raises(tmp_path):
+    """The dir_fd-less fallback raises on a refusal (path not under workspace)
+    instead of silently returning, so write_file can't report a false success."""
+    tb, wd, _ = _tb(tmp_path)
+    with pytest.raises(OSError):
+        tb._write_plain_verified(tmp_path / "outside.txt", b"x")

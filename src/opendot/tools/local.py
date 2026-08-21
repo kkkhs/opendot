@@ -55,10 +55,18 @@ def _write_via_openat2(workdir, p: Path, data: bytes) -> bool:
         return False
     import ctypes
 
+    # Lexical relative path — NOT p.resolve(), which would dereference a symlinked
+    # component in userspace before openat2 sees it, defeating RESOLVE_NO_SYMLINKS.
+    # openat2 enforces containment itself and refuses symlinks atomically.
+    wd = Path(workdir).resolve()
+    cand = p if p.is_absolute() else wd / p
+    cand = Path(os.path.normpath(str(cand)))
     try:
-        rel = str(p.resolve().relative_to(Path(workdir).resolve()))
+        rel = str(cand.relative_to(wd))
     except ValueError:
-        return False  # not under the workspace; let the caller handle it
+        return False  # not lexically under the workspace; let the caller handle it
+    if rel == "." or rel.startswith(".."):
+        return False
 
     class _OpenHow(ctypes.Structure):
         _fields_ = [
@@ -407,26 +415,21 @@ class Toolbox:
         """
         parts = self._rel_parts(p)
         if parts is None:
-            # Not lexically under the workspace: refuse to write outside.
-            return
+            # Not lexically under the workspace: refuse (raise so write_file
+            # surfaces an error rather than falsely reporting success).
+            raise OSError(f"refused: {p} is not inside the workspace")
         cur = self.workdir
         for comp in parts[:-1]:
             cur = cur / comp
             if cur.is_symlink():
-                try:
-                    cur.unlink()  # replace an escaping symlinked dir with a real one
-                except OSError:
-                    return
+                cur.unlink()  # replace an escaping symlinked dir with a real one
             if not cur.exists():
                 cur.mkdir(mode=0o755)
             elif not cur.is_dir():
-                return  # a non-dir occupies a path component; refuse
+                raise OSError(f"refused: {cur} is not a directory")
         target = cur / parts[-1]
         if target.is_symlink():
-            try:
-                target.unlink()  # never write through a symlinked final component
-            except OSError:
-                return
+            target.unlink()  # never write through a symlinked final component
         target.write_bytes(data)
 
     def _is_ignored(self, p: Path) -> bool:
