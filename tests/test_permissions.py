@@ -38,6 +38,24 @@ def test_matching_is_case_insensitive():
     assert p.decide("running git push now") == "deny"
 
 
+def test_word_boundary_no_substring_false_match():
+    # #129: 'rm' must not match inside 'reformat'; 'test' must not match 'latest'.
+    assert Policy(deny=["rm"]).decide("this will reformat the disk") == "ask"
+    assert Policy(deny=["rm"]).decide("run: rm -rf build") == "deny"
+    assert Policy(allow=["test"]).decide("checkout latest") == "ask"
+    assert Policy(allow=["test"]).decide("run test suite") == "allow"
+
+
+def test_glob_patterns():
+    # A pattern with glob metacharacters matches as an fnmatch glob against the
+    # whole prompt (or a whole line of it). Use leading/trailing * to match
+    # regardless of surrounding context.
+    assert Policy(deny=["git push*"]).decide("git push origin main") == "deny"
+    assert Policy(deny=["git push*"]).decide("git status") == "ask"
+    assert Policy(deny=["*.env"]).decide("write to config/.env") == "deny"
+    assert Policy(allow=["*rm -rf*"]).decide("run: rm -rf build") == "allow"
+
+
 def test_make_confirm_wraps_ask():
     asked = []
 
