@@ -139,8 +139,10 @@ opendot -p "..." --allow "pytest"                              # approve only th
 
 - `--yes` auto-approves anything that would otherwise prompt. Reversibility is
   unchanged: every action is still snapshotted and undoable.
-- `--allow PATTERN` / `--deny PATTERN` match a substring of the action (the
-  command or path); both are repeatable.
+- `--allow PATTERN` / `--deny PATTERN` match the action (the command or path) on
+  word boundaries — so `--deny rm` matches the `rm` command, not "refo**rm**at" —
+  or as a glob when the pattern contains `*`/`?` (e.g. `--deny "git push*"`,
+  `--deny "*.env"`). Both are repeatable.
 - Precedence is **deny > allow > (`--yes` ? approve : ask)** — so you can
   auto-approve broadly and still guarantee specific things never run.
 
@@ -242,7 +244,12 @@ CLI flags merge on top of them.
   conversation and its ledger where you left off.
 - A conservative **classifier** decides which shell commands are workspace-
   contained (auto-run, undoable) vs. escaping (confirmed first, marked
-  irreversible). When unsure, it asks.
+  irreversible). It classifies each command in a chain independently (so a safe
+  `a && b` can't smuggle a dangerous `b` past the prompt) and treats opaque
+  interpreters (`python`, `bash`, `docker`, …) as confirm-first, since a script
+  can do anything. When unsure, it asks. Built-in file writes are additionally
+  contained at the OS level so a symlinked path can't redirect them outside the
+  workspace.
 
 Honest boundary: opendot cannot undo effects that leave your machine (a sent
 email, a dropped remote database, a `git push`). It tells you *before* running
