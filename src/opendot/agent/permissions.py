@@ -63,11 +63,12 @@ class Policy:
         low = prompt.lower()
         pat = pattern.lower()
         if any(ch in pat for ch in "*?["):
-            # Glob: match against the whole prompt, and also against each line so
-            # a leading/trailing anchor isn't needed for a prompt with context.
-            return fnmatch.fnmatch(low, pat) or any(
-                fnmatch.fnmatch(line, pat) for line in low.splitlines()
-            )
+            # Glob: match the whole prompt, and each line *stripped* of its
+            # indentation — confirm prompts indent the command (e.g. "  git push
+            # ...") so a pattern like "git push*" must match the trimmed line, not
+            # the leading whitespace, or a deny rule silently misses.
+            candidates = [low, *(ln.strip() for ln in low.splitlines())]
+            return any(fnmatch.fnmatch(c, pat) for c in candidates)
         # Word-boundary substring: the pattern must appear as whole token(s).
         return re.search(rf"(?<!\w){re.escape(pat)}(?!\w)", low) is not None
 

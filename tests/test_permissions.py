@@ -107,3 +107,11 @@ def test_load_policy_from_opendot_md(tmp_path):
     p = load_policy(str(tmp_path))
     assert p.allow == ["pytest"]
     assert p.deny == ["git push"]
+
+
+def test_glob_matches_indented_prompt_line():
+    # Confirm prompts indent the command; a glob deny must still match it, or the
+    # rule is silently bypassed.
+    prompt = "This command may not be undoable:\n  git push origin main\nRun it?"
+    assert Policy(deny=["git push*"]).decide(prompt) == "deny"
+    assert Policy(deny=["git push*"]).decide("This runs:\n  git status\n") == "ask"

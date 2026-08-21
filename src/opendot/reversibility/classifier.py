@@ -194,9 +194,10 @@ def _mentions_outside_path(command: str, workdir: str) -> bool:
 
 def _split_segments(command: str) -> list[str]:
     """Split a command line into independently-run segments on shell operators,
-    without splitting inside quotes or $(...) subshells. Falls back to the whole
-    command if tokenization fails (better to classify the whole string than to
-    mis-split it)."""
+    without splitting inside quoted strings (single or double). It does NOT parse
+    $(...) subshells or backticks, so an operator inside one is treated as a real
+    split point — that only ever over-splits, which fails safe (extra confirms,
+    never a missed one). Falls back to the whole command if tokenization fails."""
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=True)
         lex.whitespace_split = True

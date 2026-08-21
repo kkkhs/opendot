@@ -38,8 +38,44 @@ _SYS_openat2 = (
 )
 
 
+_openat2_probe: bool | None = None
+
+
 def _openat2_supported() -> bool:
-    return _SYS_openat2 is not None
+    """True only if the running kernel actually has openat2 (>= 5.6), not just if
+    the syscall number is known — kernels < 5.6 return ENOSYS. Probed once (with a
+    deliberately bad fd so the probe never touches the filesystem) and cached."""
+    global _openat2_probe
+    if _SYS_openat2 is None:
+        return False
+    if _openat2_probe is not None:
+        return _openat2_probe
+    import ctypes
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+
+        class _How(ctypes.Structure):
+            _fields_ = [
+                ("flags", ctypes.c_uint64),
+                ("mode", ctypes.c_uint64),
+                ("resolve", ctypes.c_uint64),
+            ]
+
+        how = _How(flags=os.O_RDONLY, mode=0, resolve=0)
+        # Bad dir_fd (-1) => the syscall returns EBADF if openat2 exists, ENOSYS
+        # if the kernel doesn't implement it. Either way nothing is opened.
+        libc.syscall(
+            ctypes.c_long(_SYS_openat2),
+            ctypes.c_int(-1),
+            ctypes.c_char_p(b"."),
+            ctypes.byref(how),
+            ctypes.c_size_t(ctypes.sizeof(how)),
+        )
+        _openat2_probe = ctypes.get_errno() != errno.ENOSYS
+    except Exception:  # noqa: BLE001 - any failure => treat as unsupported
+        _openat2_probe = False
+    return _openat2_probe
 
 
 def _write_via_openat2(workdir, p: Path, data: bytes) -> bool:
@@ -301,7 +337,8 @@ class Toolbox:
           component ``openat`` walk with ``O_NOFOLLOW``, so *no* intermediate
           symlink is ever followed either — the same containment as openat2,
           built from openat primitives (race-free per component).
-        - Windows / no ``dir_fd`` -> plain open guarded by a realpath verify.
+        - Windows / no ``dir_fd`` -> rebuild each path component as a real dir
+          (replacing an escaping symlink), then write.
         """
         data = content.encode("utf-8")
 
