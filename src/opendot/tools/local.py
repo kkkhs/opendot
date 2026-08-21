@@ -468,6 +468,14 @@ class Toolbox:
         if target.is_symlink():
             target.unlink()  # never write through a symlinked final component
         target.write_bytes(data)
+        # Belt-and-suspenders: confirm the bytes actually landed inside the
+        # workspace. The component rebuild above should guarantee it, but if a
+        # concurrent swap slipped through, refuse loudly rather than report a
+        # false success (write_file turns this into an error).
+        try:
+            target.resolve().relative_to(self.workdir)
+        except ValueError:
+            raise OSError(f"refused: {target} escaped the workspace") from None
 
     def _is_ignored(self, p: Path) -> bool:
         return any(part in self._IGNORE for part in p.parts)

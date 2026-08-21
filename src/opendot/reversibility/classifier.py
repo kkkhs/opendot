@@ -169,26 +169,29 @@ def _mentions_outside_path(command: str, workdir: str) -> bool:
     open-time enforcement / a sandbox (see #130); this only decides whether to
     confirm.
     """
-    wd = str(Path(workdir).resolve())
-    # any ../ that could climb out, or absolute paths not under workdir
+    wd = Path(workdir).resolve()
+    # any ../ (or ..\) that could climb out
     if ".." in command:
         return True
     # writing to $HOME / ~ is outside the workspace
     if re.search(r"(^|\s)~(/|\s|$)|\$HOME", command):
         return True
-    # Check every path-like token: absolute paths, and relative tokens that
-    # resolve (through symlinks) to somewhere outside the workspace.
+    # Check every path-like token: absolute paths (POSIX / or Windows drive/UNC),
+    # and relative tokens containing a separator, resolved (through symlinks) and
+    # tested for containment with relative_to so path separators are handled
+    # correctly on every platform (not a "/"-only string prefix).
     for tok in re.findall(r"[^\s'\"|&;<>]+", command):
-        if "/" not in tok and not tok.startswith("/"):
+        p = Path(tok)
+        if not (p.is_absolute() or "/" in tok or "\\" in tok):
             continue  # not path-like
         try:
-            resolved = str(
-                (Path(workdir) / tok).resolve() if not tok.startswith("/") else Path(tok).resolve()
-            )
+            resolved = (p if p.is_absolute() else (wd / tok)).resolve()
         except (OSError, RuntimeError, ValueError):
             continue
-        if resolved != wd and not resolved.startswith(wd + "/"):
-            return True
+        try:
+            resolved.relative_to(wd)
+        except ValueError:
+            return True  # resolves outside the workspace
     return False
 
 
