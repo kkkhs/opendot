@@ -42,12 +42,7 @@ _SAFE_COMMANDS = {
     "whoami",
     "clear",
     "cls",  # harmless read-only terminal commands
-    "python",
-    "python3",
-    "node",
-    "pytest",
-    "go",
-    "cargo",  # running code in-workspace
+    "pytest",  # test runner: in-workspace, snapshot covers any files it writes
     "touch",
     "mkdir",
     "cp",
@@ -69,6 +64,32 @@ _SAFE_COMMANDS = {
     "basename",
     "dirname",
     "realpath",
+}
+
+# Interpreters / launchers whose effects can't be read from the command text: a
+# script (or -c snippet) can open sockets, write outside the workspace, or exec
+# anything. `python foo.py` is exactly as opaque as `python -c "..."`, so we
+# can't safely auto-run any of them — they are confirm-first, not blocked.
+# (#130: treat interpreters as capabilities, not commands.)
+_OPAQUE_INTERPRETERS = {
+    "python",
+    "python3",
+    "node",
+    "deno",
+    "bun",
+    "ruby",
+    "perl",
+    "php",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "make",
+    "docker",
+    "docker-compose",
+    "kubectl",
+    "go",
+    "cargo",  # `go run` / `cargo run` execute arbitrary code
 }
 
 # Signals that a command escapes the workspace or is hard/impossible to undo.
@@ -139,31 +160,93 @@ def _first_word(command: str) -> str:
 
 def _mentions_outside_path(command: str, workdir: str) -> bool:
     """Heuristic: does the command reference an absolute path or parent-escape
-    that leaves the workspace?"""
+    that leaves the workspace?
+
+    Path tokens are resolved with symlinks followed (``Path.resolve()``), so a
+    symlink *inside* the workspace that points out is caught too. This is a
+    best-effort text check, not a TOCTOU-proof guarantee — a path can be swapped
+    between this check and the command actually running. Real containment needs
+    open-time enforcement / a sandbox (see #130); this only decides whether to
+    confirm.
+    """
     wd = str(Path(workdir).resolve())
     # any ../ that could climb out, or absolute paths not under workdir
     if ".." in command:
         return True
-    for tok in re.findall(r"(?:^|\s)(/[^\s'\"]+)", command):
-        if not str(Path(tok).resolve()).startswith(wd):
-            return True
     # writing to $HOME / ~ is outside the workspace
     if re.search(r"(^|\s)~(/|\s|$)|\$HOME", command):
         return True
+    # Check every path-like token: absolute paths, and relative tokens that
+    # resolve (through symlinks) to somewhere outside the workspace.
+    for tok in re.findall(r"[^\s'\"|&;<>]+", command):
+        if "/" not in tok and not tok.startswith("/"):
+            continue  # not path-like
+        try:
+            resolved = str(
+                (Path(workdir) / tok).resolve() if not tok.startswith("/") else Path(tok).resolve()
+            )
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if resolved != wd and not resolved.startswith(wd + "/"):
+            return True
     return False
 
 
-def classify(command: str, workdir: str) -> Verdict:
-    """Return a Verdict. reversible=True => safe to snapshot+run silently."""
-    cmd = command.strip()
-    if not cmd:
-        return Verdict(True)
+def _split_segments(command: str) -> list[str]:
+    """Split a command line into independently-run segments on shell operators,
+    without splitting inside quotes or $(...) subshells. Falls back to the whole
+    command if tokenization fails (better to classify the whole string than to
+    mis-split it)."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        list(lex)  # validate it tokenizes; we only need the parse to not raise
+    except ValueError:
+        return [command]
+    # shlex validated quoting; now split on top-level operators only. We re-scan
+    # the raw text but skip operators inside single/double quotes.
+    segments: list[str] = []
+    buf: list[str] = []
+    i = 0
+    quote: str | None = None
+    while i < len(command):
+        c = command[i]
+        if quote:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        # operator?
+        two = command[i : i + 2]
+        if two in ("&&", "||"):
+            segments.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        if c in (";", "|", "\n"):
+            segments.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    segments.append("".join(buf))
+    return [s.strip() for s in segments if s.strip()]
 
+
+def _classify_segment(cmd: str, workdir: str) -> Verdict:
+    """Classify a single command segment (no shell operators)."""
     low = cmd.lower()
     head = _first_word(cmd)
 
     # Hard irreversible / escaping signals (checked first; fail safe).
-    if head in _PRIVILEGE or any(p == head for p in _PRIVILEGE):
+    if head in _PRIVILEGE:
         return Verdict(False, "runs with elevated privileges (sudo)")
     if head in _NETWORK:
         return Verdict(False, f"network access ({head})")
@@ -190,9 +273,32 @@ def classify(command: str, workdir: str) -> Verdict:
     if _mentions_outside_path(cmd, workdir):
         return Verdict(False, "touches paths outside the working directory")
 
+    # Opaque interpreters/launchers: their effects can't be read from the text, so
+    # confirm rather than auto-run (a script can do anything a -c snippet can).
+    if head in _OPAQUE_INTERPRETERS:
+        return Verdict(False, f"runs '{head}', whose effects can't be verified from the command")
+
     # Known-safe, workspace-contained commands auto-run.
     if head in _SAFE_COMMANDS:
         return Verdict(True)
 
     # Unknown command: fail safe — confirm, since we can't vouch for its effects.
     return Verdict(False, f"unrecognized command '{head}' — effects unknown")
+
+
+def classify(command: str, workdir: str) -> Verdict:
+    """Return a Verdict. reversible=True => safe to snapshot+run silently.
+
+    A command line may chain several commands (``a && b``, ``a | b``, ``a; b``).
+    Each segment is classified independently and the whole line is reversible
+    only if *every* segment is — the first escaping segment makes the line
+    non-reversible and supplies the reason. This stops a safe leading command
+    from smuggling a dangerous one past confirmation (#128).
+    """
+    if not command.strip():
+        return Verdict(True)
+    for segment in _split_segments(command):
+        verdict = _classify_segment(segment, workdir)
+        if not verdict.reversible:
+            return verdict
+    return Verdict(True)
