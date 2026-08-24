@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opendot"
-version = "0.3.2"
+version = "0.3.3"
 description = "An interactive terminal AI agent you can fully undo — any model, acts on your real files, every action reversible."
 readme = "README.md"
 license = "MIT"
@@ -21,7 +21,10 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "litellm>=1.50",     # any model: cloud, local, HF, through one interface
+    # A newer litellm release (its context_management module) hard-imports
+    # typing.NotRequired with no typing_extensions fallback, so it fails to import
+    # on Python 3.10. Cap below that until it's fixed upstream / 3.10 is dropped.
+    "litellm>=1.50,<1.95",  # any model: cloud, local, HF, through one interface
     "rich>=13.0",        # pretty terminal output (plain REPL fallback)
     "textual>=0.60",     # full-screen TUI (main pane + live ledger sidebar)
     "prompt_toolkit>=3.0",  # plain REPL input (history, editing)
