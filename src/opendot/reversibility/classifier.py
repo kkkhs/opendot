@@ -10,6 +10,13 @@ Design stance: CONSERVATIVE / fail-safe. When in doubt, treat a command as
 irreversible. A few extra confirmations are fine; a silent un-undoable surprise
 is not. This is a heuristic on shell text, not a guarantee — the reason string
 explains the call so the user can judge.
+
+It is an *explainer*, not a security boundary. Reading shell text can't fully
+account for an opaque subprocess (`python foo.py` is as unknowable as `python -c`,
+so interpreters are confirm-first) and can't win a TOCTOU symlink race against
+hostile input. Kernel-enforced isolation is the real boundary: open-time
+containment for the built-in file tools ships today; a sandbox/overlay for
+unattended runs is planned (see issue #130).
 """
 
 from __future__ import annotations
