@@ -256,14 +256,15 @@ email, a dropped remote database, a `git push`). It tells you *before* running
 those, rather than pretending otherwise.
 
 The classifier is a **heuristic that decides when to ask, not a security
-sandbox.** It reads shell text, so it can't fully account for what an opaque
-subprocess does (a script `python foo.py` runs is as unknowable as `python -c`),
-and a determined adversary could race a symlink swap. That's why interpreters are
-confirm-first and built-in file writes are contained at open time — but the
-honest framing is that the classifier *explains* why a confirmation is prudent;
-it is not a guarantee against hostile input. Kernel-enforced isolation (an
-overlay/container for unattended runs) is the stronger boundary, and it's on the
-roadmap ([#130](https://github.com/vedaant00/opendot/issues/130)).
+boundary.** It reads shell text, so it can't fully account for what an opaque
+subprocess does (the script run by `python foo.py` is as unknowable as
+`python -c`), and a determined adversary could race a symlink swap. That's why
+interpreters are confirm-first and built-in file writes are contained at open
+time — but the honest framing is that the classifier *explains* why a
+confirmation is prudent; it is not a guarantee against hostile input.
+Kernel-enforced isolation (an overlay/container for unattended runs) would be the
+stronger boundary, and is planned but not yet built
+([#130](https://github.com/vedaant00/opendot/issues/130)).
 
 **Skipping the snapshot on purpose.** When opendot runs a shell command it
 snapshots first — but for something you *want* gone (securely wiping a secret) or

@@ -12,11 +12,11 @@ is not. This is a heuristic on shell text, not a guarantee — the reason string
 explains the call so the user can judge.
 
 It is an *explainer*, not a security boundary. Reading shell text can't fully
-account for an opaque subprocess (`python foo.py` is as unknowable as `python
--c`, so interpreters are confirm-first) and can't win a TOCTOU symlink race
-against hostile input. Kernel-enforced isolation (open-time containment for the
-built-in file tools; a sandbox/overlay for unattended runs) is the real
-boundary — see issue #130.
+account for an opaque subprocess (`python foo.py` is as unknowable as `python -c`,
+so interpreters are confirm-first) and can't win a TOCTOU symlink race against
+hostile input. Kernel-enforced isolation is the real boundary: open-time
+containment for the built-in file tools ships today; a sandbox/overlay for
+unattended runs is planned (see issue #130).
 """
 
 from __future__ import annotations
