@@ -13,6 +13,15 @@ from textual.widgets import Button, Input, Static
 from opendot.tui.helpers import _row_bar, _title_bar
 
 
+def _split_header(header: str) -> tuple[str, str]:
+    """Split an HTTP header without treating ``=`` in its value as a delimiter."""
+    colon = header.find(":")
+    equals = header.find("=")
+    separator = ":" if colon >= 0 and (equals < 0 or colon < equals) else "="
+    key, _, value = header.partition(separator)
+    return key.strip(), value.strip()
+
+
 class ConfirmModal(ModalScreen[bool]):
     """A blocking yes/no modal for irreversible commands. Returns True to run."""
 
@@ -237,8 +246,8 @@ class McpAddModal(ModalScreen[dict | None]):
             if header.lower() == "oauth":
                 spec["auth"] = "oauth"  # browser-OAuth flow, no static token
             elif header:
-                k, _, v = header.partition("=") if "=" in header else header.partition(":")
-                spec["headers"] = {k.strip(): v.strip()}
+                key, value = _split_header(header)
+                spec["headers"] = {key: value}
         else:
             parts = target.split()
             spec = {"command": parts[0]}
