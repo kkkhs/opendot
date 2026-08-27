@@ -149,6 +149,32 @@ opendot -p "..." --allow "pytest"                              # approve only th
 You can pin the same rules per project in `OPENDOT.md` (see below), so they
 travel with the repo; CLI flags merge on top.
 
+### Sandbox mode (`--sandbox`)
+
+The permission policy is a heuristic gate, not a security boundary (a script it
+runs can still reach outside the workspace). For an unattended run where that
+matters, `--sandbox` moves the guarantee to a **kernel-enforced** boundary: it
+runs the turn inside a container against a *copy* of the workspace, then commits
+only the resulting diff back on success.
+
+```bash
+opendot -p "refactor and run the tests" --sandbox        # run isolated in a container
+opendot -p "..." --sandbox --sandbox-net                 # allow network (off by default)
+```
+
+- Needs **docker or podman**; if neither is installed, `--sandbox` errors — it
+  never silently falls back to a direct run.
+- Network is **off by default** inside the container; only the API key your model
+  needs is forwarded, nothing else from your environment.
+- On success the workspace diff is committed back through the reversibility engine
+  (so it's snapshotted and undoable); on failure nothing is applied.
+- One-shot only (`-p`) — an interactive session inside a headless container isn't
+  useful. Your normal, direct terminal runs are unchanged when you don't pass it.
+
+The container image (`--sandbox-image`, default `python:3.12-slim`) must have
+opendot available. This is the strongest boundary opendot offers; the classifier
+remains the explainer for direct runs.
+
 ## Connect MCP servers
 
 opendot is an [MCP](https://modelcontextprotocol.io) client: connect any MCP
