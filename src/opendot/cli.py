@@ -78,6 +78,16 @@ def _build_policy(args, workdir: str):
     return load_policy(workdir).merged_with(cli_policy)
 
 
+def _forwarded_env_keys(model: str) -> list[str]:
+    """API-key env vars to forward into a --sandbox container: just the one the
+    model needs (if set), so the containerized run can reach its provider without
+    leaking every secret in the host env."""
+    from opendot.providers import env_var_for
+
+    var = env_var_for(model)
+    return [var] if var and os.environ.get(var) else []
+
+
 def _make_confirm(args, workdir: str, interactive: bool):
     """Build the confirm callback: policy-gated, falling back to the interactive
     prompt (or an auto-decline in one-shot mode) for anything left to ask."""
@@ -687,6 +697,25 @@ def main() -> None:
         help="Always refuse actions whose confirm prompt contains PATTERN, even "
         "with --yes (repeatable, e.g. --deny 'git push').",
     )
+    parser.add_argument(
+        "--sandbox",
+        action="store_true",
+        help="Run a one-shot (-p) turn inside a container against a copy of the "
+        "workspace, committing only the resulting diff back on success. Needs "
+        "docker or podman; errors if neither is present (never falls back to a "
+        "direct run). Kernel-enforced isolation for unattended runs.",
+    )
+    parser.add_argument(
+        "--sandbox-image",
+        default="python:3.12-slim",
+        help="Container image for --sandbox (must have opendot installed, or "
+        "install it in an entrypoint). Default: python:3.12-slim.",
+    )
+    parser.add_argument(
+        "--sandbox-net",
+        action="store_true",
+        help="Allow network access inside the --sandbox container (off by default).",
+    )
     parser.add_argument("--version", action="version", version=f"opendot {__version__}")
 
     sub = parser.add_subparsers(dest="command")
@@ -774,6 +803,31 @@ def main() -> None:
     oneshot = args.prompt
     if oneshot is None and not sys.stdin.isatty():
         oneshot = sys.stdin.read().strip() or None
+
+    if oneshot and getattr(args, "sandbox", False):
+        # Kernel-isolated run: execute the turn inside a container against a copy
+        # of the workspace, then commit the diff back. Fails closed (errors) if no
+        # container runtime — never silently runs directly.
+        from opendot import sandbox
+
+        try:
+            result = sandbox.run_sandboxed(
+                workdir,
+                oneshot,
+                args.model,
+                image=args.sandbox_image,
+                network=args.sandbox_net,
+                env_keys=_forwarded_env_keys(args.model),
+            )
+        except sandbox.SandboxError as exc:
+            console.print(f"[bold red]sandbox:[/bold red] {exc}")
+            raise SystemExit(2) from exc
+        n = len(result["changed"])
+        console.print(
+            f"[dim]sandbox ({result['runtime']}) exited {result['returncode']}; "
+            f"committed {n} changed file(s) back to the workspace[/dim]"
+        )
+        return
 
     if oneshot:
         # Non-interactive: can't prompt, so decline irreversible commands unless
