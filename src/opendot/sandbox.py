@@ -130,9 +130,14 @@ def _prepare_dest(dst: Path, real_root: Path) -> None:
                     f"commit-back can't neutralize symlink on path: {comp} ({exc})"
                 ) from exc
         elif comp == dst and comp.is_dir():
-            # A real directory where the sandbox now has a file: the sandbox view
-            # is authoritative on commit, so replace it.
-            shutil.rmtree(dst, ignore_errors=True)
+            # A real directory where the sandbox now has a file. We must NOT rmtree
+            # it: that tree can contain ignored subtrees (.venv, node_modules, …)
+            # that commit_back promises never to touch, and _iter_files only skips
+            # them during enumeration, not during a recursive delete. Refuse the
+            # replacement and let the caller report it as failed.
+            raise SandboxError(
+                f"commit-back destination is a directory (refusing to delete): {dst}"
+            )
     # Path is now symlink-free and contained; safe to create the parent tree.
     dst.parent.mkdir(parents=True, exist_ok=True)
 

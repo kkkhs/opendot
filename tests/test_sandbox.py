@@ -229,6 +229,25 @@ def test_commit_back_refuses_when_symlink_cannot_be_neutralized(tmp_path, monkey
     assert not (outside / "deep").exists()
 
 
+def test_commit_back_refuses_dir_to_file_replacement(tmp_path):
+    # The sandbox has a file where the real workspace has a directory. rmtree-ing
+    # that dir could wipe ignored subtrees (.venv, node_modules), which commit_back
+    # promises never to touch — so it must refuse and report the path as failed.
+    wd = tmp_path / "ws"
+    (wd / "thing" / ".venv").mkdir(parents=True)
+    (wd / "thing" / ".venv" / "keep").write_text("precious")
+
+    sbx = tmp_path / "sbx"
+    sbx.mkdir()
+    (sbx / "thing").write_text("now a file")  # dir -> file in the sandbox
+
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert "thing" in failed
+    assert "thing" not in changed
+    assert (wd / "thing").is_dir()  # directory (and its contents) left intact
+    assert (wd / "thing" / ".venv" / "keep").read_text() == "precious"
+
+
 def test_commit_back_leaves_ignored_trees_untouched(tmp_path):
     # A change under an ignored tree in the sandbox must not be copied back.
     wd = tmp_path / "ws"
