@@ -68,9 +68,10 @@ def require_runtime() -> str:
 def _copy_workspace(workdir: Path, dest: Path, rules: IgnoreRules) -> None:
     """Copy the (non-ignored) workspace tree into ``dest``.
 
-    Ignored trees (.git, node_modules, venvs, …) are skipped, matching what the
-    snapshot engine captures — the sandbox operates on the same view the
-    reversibility engine can reconcile."""
+    Ignored trees (.git, node_modules, venvs, …) are skipped per the ignore rules,
+    so the sandbox works on the same ignored-path view the reversibility engine
+    reconciles. (Unlike snapshotting, this does not skip very large files — the
+    whole non-ignored tree is copied.)"""
     for f in _iter_files(workdir, rules):
         rel = f.relative_to(workdir)
         target = dest / rel
@@ -91,18 +92,23 @@ def _hash(path: Path) -> str | None:
         return None
 
 
-def commit_back(sandbox_dir: Path, workdir: Path, rules: IgnoreRules) -> list[str]:
+def commit_back(
+    sandbox_dir: Path, workdir: Path, rules: IgnoreRules
+) -> tuple[list[str], list[str]]:
     """Reconcile the post-run sandbox copy back into the real workspace.
 
     Applies files that were created or changed in the sandbox, and removes
     (non-ignored) files the sandbox deleted, so the real workspace ends up
     matching the sandbox's non-ignored view. Ignored trees are never touched.
-    Returns the list of relative paths that changed (for the caller to report).
 
-    The caller snapshots the real workspace *before* calling this (via the
-    reversibility engine), so the whole commit-back is itself undoable.
+    Returns ``(changed, failed)``: relative paths successfully reconciled, and
+    paths that could NOT be reconciled (a copy or delete that raised) — the
+    caller surfaces ``failed`` so a partial commit-back is never reported as a
+    clean one. The caller snapshots the real workspace *before* calling this, so
+    the whole commit-back is itself undoable (subject to the snapshot size limit).
     """
     changed: list[str] = []
+    failed: list[str] = []
 
     sandbox_files = {
         f.relative_to(sandbox_dir).as_posix(): f for f in _iter_files(sandbox_dir, rules)
@@ -113,9 +119,12 @@ def commit_back(sandbox_dir: Path, workdir: Path, rules: IgnoreRules) -> list[st
     for rel, src in sandbox_files.items():
         dst = workdir / rel
         if rel not in real_files or _hash(src) != _hash(dst):
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            changed.append(rel)
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                changed.append(rel)
+            except OSError:
+                failed.append(rel)
 
     # 2. Remove files the sandbox deleted (present in real, absent in sandbox).
     for rel, dst in real_files.items():
@@ -124,9 +133,9 @@ def commit_back(sandbox_dir: Path, workdir: Path, rules: IgnoreRules) -> list[st
                 dst.unlink()
                 changed.append(rel)
             except OSError:
-                pass
+                failed.append(rel)
 
-    return sorted(set(changed))
+    return sorted(set(changed)), sorted(set(failed))
 
 
 def build_run_command(
@@ -193,6 +202,7 @@ def run_sandboxed(
         returncode = getattr(proc, "returncode", 0)
 
         changed: list[str] = []
+        failed: list[str] = []
         if returncode == 0:
             # Snapshot the real workspace first so the commit-back is undoable,
             # then reconcile the sandbox result into it.
@@ -202,7 +212,12 @@ def run_sandboxed(
             rev.before_action(
                 "write", "sandbox commit", reversible=True, note="sandbox --sandbox run"
             )
-            changed = commit_back(sandbox_dir, wd, rules)
-        return {"runtime": runtime, "changed": changed, "returncode": returncode}
+            changed, failed = commit_back(sandbox_dir, wd, rules)
+        return {
+            "runtime": runtime,
+            "changed": changed,
+            "failed": failed,
+            "returncode": returncode,
+        }
     finally:
         shutil.rmtree(staging, ignore_errors=True)

@@ -167,7 +167,8 @@ opendot -p "..." --sandbox --sandbox-net                 # allow network (off by
 - Network is **off by default** inside the container; only the API key your model
   needs is forwarded, nothing else from your environment.
 - On success the workspace diff is committed back through the reversibility engine
-  (so it's snapshotted and undoable); on failure nothing is applied.
+  (snapshotted and undoable, subject to the snapshot size limit for very large
+  files); on a non-zero container exit nothing is applied.
 - One-shot only (`-p`) — an interactive session inside a headless container isn't
   useful. Your normal, direct terminal runs are unchanged when you don't pass it.
 

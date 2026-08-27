@@ -24,8 +24,10 @@ guarantee must come from a boundary the kernel enforces.
 - **Copy-in / diff-out.** The (non-ignored) workspace is copied to a temp dir,
   that copy is mounted into the container, the turn runs there, and on success
   the copy is reconciled back to the real workspace. The commit-back is
-  snapshotted first via the reversibility engine, so it is itself undoable; on a
-  non-zero container exit, nothing is applied.
+  snapshotted first via the reversibility engine, so it is itself undoable
+  (subject to the snapshot size limit for very large files); on a non-zero
+  container exit, nothing is applied. Files that can't be reconciled (a copy/
+  delete that raises) are reported, never silently dropped.
 - **Least privilege.** Network off by default (`--network none`, opt in with
   `--sandbox-net`); only the API-key env var the model needs is forwarded.
 - **Scope.** One-shot (`-p`) only — a headless-container TUI/REPL isn't useful.

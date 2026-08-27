@@ -804,6 +804,17 @@ def main() -> None:
     if oneshot is None and not sys.stdin.isatty():
         oneshot = sys.stdin.read().strip() or None
 
+    # --sandbox only makes sense for a one-shot run (a headless-container TUI/REPL
+    # isn't useful). Fail closed rather than silently running un-isolated — a user
+    # who asked for the sandbox must not get a direct run thinking they're isolated.
+    if getattr(args, "sandbox", False) and not oneshot:
+        console.print(
+            "[bold red]sandbox:[/bold red] --sandbox requires a one-shot prompt "
+            "(-p '...'); it can't isolate an interactive session. Run with -p, or "
+            "drop --sandbox."
+        )
+        raise SystemExit(2)
+
     if oneshot and getattr(args, "sandbox", False):
         # Kernel-isolated run: execute the turn inside a container against a copy
         # of the workspace, then commit the diff back. Fails closed (errors) if no
@@ -827,6 +838,13 @@ def main() -> None:
             f"[dim]sandbox ({result['runtime']}) exited {result['returncode']}; "
             f"committed {n} changed file(s) back to the workspace[/dim]"
         )
+        failed = result.get("failed") or []
+        if failed:
+            console.print(
+                f"[yellow]sandbox: {len(failed)} file(s) could not be committed back "
+                f"(check permissions): {', '.join(failed[:5])}"
+                f"{'…' if len(failed) > 5 else ''}[/yellow]"
+            )
         return
 
     if oneshot:

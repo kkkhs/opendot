@@ -49,9 +49,8 @@ def test_build_run_command_network_off_and_scoped_env():
     assert argv[:2] == ["docker", "run"]
     assert "--network" in argv and "none" in argv  # isolated by default
     assert "-e" in argv and "OPENAI_API_KEY" in argv  # only the named key
-    # runs opendot one-shot, auto-approve (already isolated)
-    assert argv[-5:] == ["opendot", "-p", "do it", "--model", "gpt-5.1"] or "--yes" in argv
-    assert "--yes" in argv
+    # runs opendot one-shot inside the container, auto-approve (already isolated)
+    assert argv[-7:] == ["img", "opendot", "-p", "do it", "--model", "gpt-5.1", "--yes"]
 
 
 def test_build_run_command_network_on_when_allowed():
@@ -137,6 +136,48 @@ def test_commit_back_leaves_ignored_trees_untouched(tmp_path):
     (sbx / ".git" / "config").write_text("sneaky")
     (sbx / "real.txt").write_text("ok")
 
-    changed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
     assert "real.txt" in changed
+    assert failed == []
     assert not (wd / ".git").exists()  # ignored tree not committed back
+
+
+def test_commit_back_reports_failed_deletion(tmp_path, monkeypatch):
+    # A delete that can't be performed is reported in `failed`, not silently dropped.
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "locked.txt").write_text("x")  # present in real, absent in sandbox -> delete
+    sbx = tmp_path / "sbx"
+    sbx.mkdir()
+
+    import pathlib
+
+    real_unlink = pathlib.Path.unlink
+
+    def boom(self, *a, **k):
+        if self.name == "locked.txt":
+            raise OSError("permission denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", boom)
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert failed == ["locked.txt"]
+    assert "locked.txt" not in changed
+
+
+def test_sandbox_without_prompt_fails_closed(monkeypatch, capsys):
+    # --sandbox with no one-shot prompt must error, not run un-isolated.
+    import sys as _sys
+
+    from opendot import cli
+
+    monkeypatch.setattr(_sys, "argv", ["opendot", "--sandbox", "--repl"])
+
+    class _Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(_sys, "stdin", _Tty())
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == 2
