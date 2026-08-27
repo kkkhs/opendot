@@ -13,6 +13,25 @@ from textual.widgets import Button, Input, Static
 from opendot.tui.helpers import _row_bar, _title_bar
 
 
+def _split_header(header: str) -> tuple[str, str]:
+    """Split an HTTP header without treating ``=`` in its value as a delimiter.
+
+    Returns ``("", "")`` for a malformed header (no delimiter, or an empty key
+    like ``=abc`` / ``:abc``) so the caller can skip it rather than persist an
+    invalid ``{"": ...}`` entry into the server spec.
+    """
+    colon = header.find(":")
+    equals = header.find("=")
+    if colon < 0 and equals < 0:
+        return "", ""  # no delimiter at all: not a key/value header
+    separator = ":" if colon >= 0 and (equals < 0 or colon < equals) else "="
+    key, _, value = header.partition(separator)
+    key = key.strip()
+    if not key:
+        return "", ""
+    return key, value.strip()
+
+
 class ConfirmModal(ModalScreen[bool]):
     """A blocking yes/no modal for irreversible commands. Returns True to run."""
 
@@ -237,8 +256,9 @@ class McpAddModal(ModalScreen[dict | None]):
             if header.lower() == "oauth":
                 spec["auth"] = "oauth"  # browser-OAuth flow, no static token
             elif header:
-                k, _, v = header.partition("=") if "=" in header else header.partition(":")
-                spec["headers"] = {k.strip(): v.strip()}
+                key, value = _split_header(header)
+                if key:  # skip a malformed header rather than persist {"": ...}
+                    spec["headers"] = {key: value}
         else:
             parts = target.split()
             spec = {"command": parts[0]}
