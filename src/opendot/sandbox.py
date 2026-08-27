@@ -96,33 +96,45 @@ def _prepare_dest(dst: Path, real_root: Path) -> None:
     """Make ``dst`` safe to write during commit-back, or raise SandboxError.
 
     The sandbox is untrusted, so a path it produces must not let commit-back
-    write outside the workspace. Two escapes are closed here:
+    write outside the workspace. A symlink anywhere in ``dst``'s existing path
+    would make ``shutil.copy2`` (and any ``mkdir``) follow it and touch the link
+    target — possibly outside ``real_root``.
 
-    - A symlink anywhere in ``dst``'s existing path would make ``shutil.copy2``
-      follow it and write to the link target (possibly outside ``real_root``).
-      Any existing symlink component is removed so the copy lands on a real path.
-    - Even with symlinks gone, the resolved parent must stay under ``real_root``;
-      if it doesn't, we refuse rather than write outside containment.
+    Everything here is check-first: no directory is created and no file is copied
+    until the whole path is proven contained. Walking top-down from ``real_root``:
+
+    - each existing component that resolves outside ``real_root`` is refused;
+    - a symlink component is removed so nothing downstream follows it, and if it
+      can't be removed we refuse rather than fall through to a ``mkdir`` that
+      would traverse it and create dirs in the link target;
+    - only once the path is clean and contained do we create parents.
     """
-    # Remove an existing symlink (or a symlink standing in for a needed dir) at or
-    # above dst, walking down from real_root, so nothing on the path is followed.
-    for parent in reversed(dst.parents):
-        try:
-            if parent.is_relative_to(real_root) and parent != real_root and parent.is_symlink():
-                parent.unlink()
-        except OSError:
-            pass
-    if dst.is_symlink() or (dst.exists() and dst.is_dir()):
-        # A symlink at dst would be followed by copy2; a dir there blocks the file
-        # write. Neutralize both (the sandbox's view is authoritative on commit).
-        if dst.is_dir() and not dst.is_symlink():
-            shutil.rmtree(dst, ignore_errors=True)
-        else:
-            dst.unlink(missing_ok=True)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    resolved_parent = dst.parent.resolve()
-    if not (resolved_parent == real_root or resolved_parent.is_relative_to(real_root)):
+    # dst must be lexically under real_root to begin with; a crafted rel path with
+    # ".." components would fail this before we touch the filesystem.
+    if not dst.is_relative_to(real_root):
         raise SandboxError(f"commit-back destination escapes workspace: {dst}")
+
+    # Walk the components strictly between real_root and dst (real_root is the
+    # trusted base and is never a symlink we'd remove), top-down, ending at dst.
+    rel_parts = dst.relative_to(real_root).parts
+    for i in range(1, len(rel_parts) + 1):
+        comp = real_root.joinpath(*rel_parts[:i])
+        if comp.is_symlink():
+            # Remove the link (never follow it). Do NOT swallow the error: a
+            # symlink we can't unlink must abort before any mkdir traverses it and
+            # creates directories inside the link target.
+            try:
+                comp.unlink()
+            except OSError as exc:
+                raise SandboxError(
+                    f"commit-back can't neutralize symlink on path: {comp} ({exc})"
+                ) from exc
+        elif comp == dst and comp.is_dir():
+            # A real directory where the sandbox now has a file: the sandbox view
+            # is authoritative on commit, so replace it.
+            shutil.rmtree(dst, ignore_errors=True)
+    # Path is now symlink-free and contained; safe to create the parent tree.
+    dst.parent.mkdir(parents=True, exist_ok=True)
 
 
 def commit_back(

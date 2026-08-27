@@ -198,6 +198,37 @@ def test_commit_back_does_not_follow_symlink_out_of_workspace(tmp_path):
     assert "linkdir/victim.txt" in changed
 
 
+def test_commit_back_refuses_when_symlink_cannot_be_neutralized(tmp_path, monkeypatch):
+    # If a symlink path component can't be unlinked, commit-back must refuse
+    # (-> failed) BEFORE any mkdir traverses it and creates dirs in the target.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "linkdir").symlink_to(outside, target_is_directory=True)
+
+    sbx = tmp_path / "sbx"
+    (sbx / "linkdir").mkdir(parents=True)
+    (sbx / "linkdir" / "deep" / "x.txt").parent.mkdir(parents=True)
+    (sbx / "linkdir" / "deep" / "x.txt").write_text("nope")
+
+    import pathlib
+
+    real_unlink = pathlib.Path.unlink
+
+    def refuse_link(self, *a, **k):
+        if self.is_symlink():
+            raise OSError("cannot unlink symlink")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", refuse_link)
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert "linkdir/deep/x.txt" in failed
+    # Nothing was created in the symlink target outside the workspace.
+    assert not (outside / "deep").exists()
+
+
 def test_commit_back_leaves_ignored_trees_untouched(tmp_path):
     # A change under an ignored tree in the sandbox must not be copied back.
     wd = tmp_path / "ws"
