@@ -846,7 +846,12 @@ def main() -> None:
                 f"{'…' if len(failed) > 5 else ''}[/yellow]"
             )
         # Propagate the container's exit status so CI/scripting sees a failed run.
-        raise SystemExit(int(result["returncode"]))
+        # A clean container exit with a partial commit-back leaves the workspace in
+        # an indeterminate state, so surface that as a failure too (exit 1).
+        exit_code = int(result["returncode"])
+        if exit_code == 0 and failed:
+            exit_code = 1
+        raise SystemExit(exit_code)
 
     if oneshot:
         # Non-interactive: can't prompt, so decline irreversible commands unless

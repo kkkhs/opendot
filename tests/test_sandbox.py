@@ -175,6 +175,79 @@ def test_commit_back_reports_unreadable_sandbox_file(tmp_path, monkeypatch):
     assert not (wd / "bad.txt").exists()
 
 
+def test_commit_back_does_not_follow_symlink_out_of_workspace(tmp_path):
+    # A symlinked path component in the real workspace must not let commit-back
+    # write through it to a target outside the workspace (containment escape).
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.txt").write_text("original-outside")
+
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "linkdir").symlink_to(outside, target_is_directory=True)
+
+    sbx = tmp_path / "sbx"
+    (sbx / "linkdir").mkdir(parents=True)
+    (sbx / "linkdir" / "victim.txt").write_text("HACKED")
+
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    # The outside file is untouched; the write landed inside the workspace instead.
+    assert (outside / "victim.txt").read_text() == "original-outside"
+    assert not (wd / "linkdir").is_symlink()
+    assert (wd / "linkdir" / "victim.txt").read_text() == "HACKED"
+    assert "linkdir/victim.txt" in changed
+
+
+def test_commit_back_refuses_when_symlink_cannot_be_neutralized(tmp_path, monkeypatch):
+    # If a symlink path component can't be unlinked, commit-back must refuse
+    # (-> failed) BEFORE any mkdir traverses it and creates dirs in the target.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "linkdir").symlink_to(outside, target_is_directory=True)
+
+    sbx = tmp_path / "sbx"
+    (sbx / "linkdir").mkdir(parents=True)
+    (sbx / "linkdir" / "deep" / "x.txt").parent.mkdir(parents=True)
+    (sbx / "linkdir" / "deep" / "x.txt").write_text("nope")
+
+    import pathlib
+
+    real_unlink = pathlib.Path.unlink
+
+    def refuse_link(self, *a, **k):
+        if self.is_symlink():
+            raise OSError("cannot unlink symlink")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", refuse_link)
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert "linkdir/deep/x.txt" in failed
+    # Nothing was created in the symlink target outside the workspace.
+    assert not (outside / "deep").exists()
+
+
+def test_commit_back_refuses_dir_to_file_replacement(tmp_path):
+    # The sandbox has a file where the real workspace has a directory. rmtree-ing
+    # that dir could wipe ignored subtrees (.venv, node_modules), which commit_back
+    # promises never to touch — so it must refuse and report the path as failed.
+    wd = tmp_path / "ws"
+    (wd / "thing" / ".venv").mkdir(parents=True)
+    (wd / "thing" / ".venv" / "keep").write_text("precious")
+
+    sbx = tmp_path / "sbx"
+    sbx.mkdir()
+    (sbx / "thing").write_text("now a file")  # dir -> file in the sandbox
+
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert "thing" in failed
+    assert "thing" not in changed
+    assert (wd / "thing").is_dir()  # directory (and its contents) left intact
+    assert (wd / "thing" / ".venv" / "keep").read_text() == "precious"
+
+
 def test_commit_back_leaves_ignored_trees_untouched(tmp_path):
     # A change under an ignored tree in the sandbox must not be copied back.
     wd = tmp_path / "ws"
@@ -248,3 +321,27 @@ def test_cli_sandbox_propagates_container_exit_code(monkeypatch):
     with pytest.raises(SystemExit) as ei:
         cli.main()
     assert ei.value.code == 3
+
+
+def test_cli_sandbox_partial_commit_back_exits_nonzero(monkeypatch):
+    # Container exited 0 but some files could not be committed back -> the
+    # workspace is indeterminate, so the CLI must exit non-zero for CI/scripting.
+    import sys as _sys
+
+    from opendot import cli
+    from opendot import sandbox as sbx
+
+    monkeypatch.setattr(_sys, "argv", ["opendot", "-p", "do it", "--model", "gpt-5.1", "--sandbox"])
+    monkeypatch.setattr(
+        sbx,
+        "run_sandboxed",
+        lambda *a, **k: {
+            "runtime": "docker",
+            "changed": ["a.txt"],
+            "failed": ["b.txt"],
+            "returncode": 0,
+        },
+    )
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == 1

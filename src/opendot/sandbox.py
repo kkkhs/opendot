@@ -92,6 +92,56 @@ def _hash(path: Path) -> str | None:
         return None
 
 
+def _prepare_dest(dst: Path, real_root: Path) -> None:
+    """Make ``dst`` safe to write during commit-back, or raise SandboxError.
+
+    The sandbox is untrusted, so a path it produces must not let commit-back
+    write outside the workspace. A symlink anywhere in ``dst``'s existing path
+    would make ``shutil.copy2`` (and any ``mkdir``) follow it and touch the link
+    target — possibly outside ``real_root``.
+
+    Everything here is check-first: no directory is created and no file is copied
+    until the whole path is proven contained. Walking top-down from ``real_root``:
+
+    - each existing component that resolves outside ``real_root`` is refused;
+    - a symlink component is removed so nothing downstream follows it, and if it
+      can't be removed we refuse rather than fall through to a ``mkdir`` that
+      would traverse it and create dirs in the link target;
+    - only once the path is clean and contained do we create parents.
+    """
+    # dst must be lexically under real_root to begin with; a crafted rel path with
+    # ".." components would fail this before we touch the filesystem.
+    if not dst.is_relative_to(real_root):
+        raise SandboxError(f"commit-back destination escapes workspace: {dst}")
+
+    # Walk the components strictly between real_root and dst (real_root is the
+    # trusted base and is never a symlink we'd remove), top-down, ending at dst.
+    rel_parts = dst.relative_to(real_root).parts
+    for i in range(1, len(rel_parts) + 1):
+        comp = real_root.joinpath(*rel_parts[:i])
+        if comp.is_symlink():
+            # Remove the link (never follow it). Do NOT swallow the error: a
+            # symlink we can't unlink must abort before any mkdir traverses it and
+            # creates directories inside the link target.
+            try:
+                comp.unlink()
+            except OSError as exc:
+                raise SandboxError(
+                    f"commit-back can't neutralize symlink on path: {comp} ({exc})"
+                ) from exc
+        elif comp == dst and comp.is_dir():
+            # A real directory where the sandbox now has a file. We must NOT rmtree
+            # it: that tree can contain ignored subtrees (.venv, node_modules, …)
+            # that commit_back promises never to touch, and _iter_files only skips
+            # them during enumeration, not during a recursive delete. Refuse the
+            # replacement and let the caller report it as failed.
+            raise SandboxError(
+                f"commit-back destination is a directory (refusing to delete): {dst}"
+            )
+    # Path is now symlink-free and contained; safe to create the parent tree.
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+
 def commit_back(
     sandbox_dir: Path, workdir: Path, rules: IgnoreRules
 ) -> tuple[list[str], list[str]]:
@@ -109,6 +159,7 @@ def commit_back(
     """
     changed: list[str] = []
     failed: list[str] = []
+    real_root = workdir.resolve()
 
     sandbox_files = {
         f.relative_to(sandbox_dir).as_posix(): f for f in _iter_files(sandbox_dir, rules)
@@ -127,10 +178,10 @@ def commit_back(
         dst_h = _hash(dst) if rel in real_files else None
         if rel not in real_files or src_h != dst_h:
             try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
+                _prepare_dest(dst, real_root)
                 shutil.copy2(src, dst)
                 changed.append(rel)
-            except OSError:
+            except (OSError, SandboxError):
                 failed.append(rel)
 
     # 2. Remove files the sandbox deleted (present in real, absent in sandbox).
