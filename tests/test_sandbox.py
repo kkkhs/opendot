@@ -127,6 +127,54 @@ def test_run_sandboxed_fails_closed_without_runtime(tmp_path, monkeypatch):
         sandbox.run_sandboxed(str(tmp_path), "x", "m", image="img", runner=lambda a: None)
 
 
+def test_run_sandboxed_fails_closed_when_runner_returns_no_process(tmp_path, monkeypatch):
+    # A runner that returns None (or anything without .returncode) means the
+    # container never ran; that must fail closed, not commit back as rc=0.
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: "docker")
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "keep.txt").write_text("original")
+    with pytest.raises(sandbox.SandboxError, match="returncode"):
+        sandbox.run_sandboxed(str(wd), "x", "m", image="img", runner=lambda a: None)
+    assert (wd / "keep.txt").read_text() == "original"  # nothing committed
+
+
+def test_run_sandboxed_wraps_staging_error_as_sandbox_error(tmp_path, monkeypatch):
+    # A copy-in failure surfaces as SandboxError (the CLI's fail-closed handler),
+    # not a raw OSError that bypasses it.
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: "docker")
+
+    def boom(*a, **k):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(sandbox, "_copy_workspace", boom)
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    with pytest.raises(sandbox.SandboxError, match="stage workspace"):
+        sandbox.run_sandboxed(str(wd), "x", "m", image="img", runner=lambda a: None)
+
+
+def test_commit_back_reports_unreadable_sandbox_file(tmp_path, monkeypatch):
+    # A sandbox file whose hash can't be read is reported in `failed`, not skipped
+    # as "unchanged" via a None == None comparison.
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    sbx = tmp_path / "sbx"
+    sbx.mkdir()
+    (sbx / "bad.txt").write_text("x")
+
+    real_hash = sandbox._hash
+
+    def maybe_none(path):
+        return None if path.name == "bad.txt" else real_hash(path)
+
+    monkeypatch.setattr(sandbox, "_hash", maybe_none)
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert failed == ["bad.txt"]
+    assert "bad.txt" not in changed
+    assert not (wd / "bad.txt").exists()
+
+
 def test_commit_back_leaves_ignored_trees_untouched(tmp_path):
     # A change under an ignored tree in the sandbox must not be copied back.
     wd = tmp_path / "ws"
@@ -181,3 +229,22 @@ def test_sandbox_without_prompt_fails_closed(monkeypatch, capsys):
     with pytest.raises(SystemExit) as ei:
         cli.main()
     assert ei.value.code == 2
+
+
+def test_cli_sandbox_propagates_container_exit_code(monkeypatch):
+    # A non-zero container exit must become the process exit code so CI/scripting
+    # sees the failure, not a silent success.
+    import sys as _sys
+
+    from opendot import cli
+    from opendot import sandbox as sbx
+
+    monkeypatch.setattr(_sys, "argv", ["opendot", "-p", "do it", "--model", "gpt-5.1", "--sandbox"])
+    monkeypatch.setattr(
+        sbx,
+        "run_sandboxed",
+        lambda *a, **k: {"runtime": "docker", "changed": [], "failed": [], "returncode": 3},
+    )
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == 3

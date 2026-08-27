@@ -118,7 +118,14 @@ def commit_back(
     # 1. Create / update files present in the sandbox (new, or content changed).
     for rel, src in sandbox_files.items():
         dst = workdir / rel
-        if rel not in real_files or _hash(src) != _hash(dst):
+        src_h = _hash(src)
+        if src_h is None:
+            # Can't read the sandbox file to compare or copy it — report it rather
+            # than let a None==None hash comparison skip it as "unchanged".
+            failed.append(rel)
+            continue
+        dst_h = _hash(dst) if rel in real_files else None
+        if rel not in real_files or src_h != dst_h:
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
@@ -178,9 +185,9 @@ def run_sandboxed(
     """Run one opendot turn inside a container against a copy of ``workdir``, then
     commit the resulting diff back to the real workspace (snapshotted first).
 
-    Returns ``{"runtime", "changed", "returncode"}``. Raises SandboxError if no
-    runtime is available or the workspace can't be staged. ``runner`` is injected
-    for testing (defaults to subprocess.run).
+    Returns ``{"runtime", "changed", "failed", "returncode"}``. Raises SandboxError
+    if no runtime is available, the workspace can't be staged, or the runner returns
+    no usable process. ``runner`` is injected for testing (defaults to subprocess.run).
     """
     import tempfile
 
@@ -193,13 +200,20 @@ def run_sandboxed(
     sandbox_dir = staging / "work"
     sandbox_dir.mkdir()
     try:
-        _copy_workspace(wd, sandbox_dir, rules)
+        try:
+            _copy_workspace(wd, sandbox_dir, rules)
+        except OSError as exc:
+            raise SandboxError(f"failed to stage workspace copy: {exc}") from exc
 
         argv = build_run_command(
             runtime, image, sandbox_dir, prompt, model, network=network, env_keys=env_keys
         )
         proc = runner(argv)
-        returncode = getattr(proc, "returncode", 0)
+        # A runner that returns nothing usable means the container never ran; treat
+        # that as a failure rather than a returncode-0 "success" that commits back.
+        if proc is None or not hasattr(proc, "returncode"):
+            raise SandboxError("container runner returned no process/returncode")
+        returncode = int(proc.returncode)
 
         changed: list[str] = []
         failed: list[str] = []

@@ -845,7 +845,8 @@ def main() -> None:
                 f"(check permissions): {', '.join(failed[:5])}"
                 f"{'…' if len(failed) > 5 else ''}[/yellow]"
             )
-        return
+        # Propagate the container's exit status so CI/scripting sees a failed run.
+        raise SystemExit(int(result["returncode"]))
 
     if oneshot:
         # Non-interactive: can't prompt, so decline irreversible commands unless
