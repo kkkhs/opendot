@@ -1,0 +1,250 @@
+"""Tests for the --sandbox container isolation scaffold (#130 Phase 1).
+
+The live in-container run is validated on a docker/podman host; these cover the
+host-side plumbing — runtime detection/fail-closed, the run command, and
+copy-in/diff-out commit-back — with the runtime mocked.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from opendot import sandbox
+from opendot.reversibility.snapshots import IgnoreRules
+
+# -- runtime detection / fail-closed --
+
+
+def test_require_runtime_fails_closed_when_none(monkeypatch):
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: None)
+    with pytest.raises(sandbox.SandboxError, match="container runtime"):
+        sandbox.require_runtime()
+
+
+def test_require_runtime_returns_detected(monkeypatch):
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: "podman")
+    assert sandbox.require_runtime() == "podman"
+
+
+def test_detect_runtime_prefers_podman(monkeypatch):
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/" + name)
+    assert sandbox.detect_runtime() == "podman"  # first in preference order
+
+
+# -- run command shape --
+
+
+def test_build_run_command_network_off_and_scoped_env():
+    argv = sandbox.build_run_command(
+        "docker",
+        "img",
+        Path("/tmp/sbx"),
+        "do it",
+        "gpt-5.1",
+        network=False,
+        env_keys=["OPENAI_API_KEY"],
+    )
+    assert argv[:2] == ["docker", "run"]
+    assert "--network" in argv and "none" in argv  # isolated by default
+    assert "-e" in argv and "OPENAI_API_KEY" in argv  # only the named key
+    # runs opendot one-shot inside the container, auto-approve (already isolated)
+    assert argv[-7:] == ["img", "opendot", "-p", "do it", "--model", "gpt-5.1", "--yes"]
+
+
+def test_build_run_command_network_on_when_allowed():
+    argv = sandbox.build_run_command(
+        "podman", "img", Path("/tmp/sbx"), "x", "m", network=True, env_keys=[]
+    )
+    assert "--network" not in argv  # network allowed -> no isolation flag
+
+
+# -- copy-in / commit-back --
+
+
+def _fake_runner_editing(edits):
+    """A runner that applies `edits(sandbox_dir)` and returns rc=0."""
+
+    def run(argv):
+        sbx = Path(argv[argv.index("-v") + 1].split(":")[0])
+        edits(sbx)
+
+        class P:
+            returncode = 0
+
+        return P()
+
+    return run
+
+
+def test_run_sandboxed_commits_changes_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: "docker")
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "keep.txt").write_text("original")
+    (wd / "gone.txt").write_text("bye")
+
+    def edits(sbx: Path):
+        (sbx / "keep.txt").write_text("EDITED")  # modify
+        (sbx / "new.txt").write_text("created")  # create
+        (sbx / "gone.txt").unlink()  # delete
+
+    res = sandbox.run_sandboxed(
+        str(wd), "go", "gpt-5.1", image="img", runner=_fake_runner_editing(edits)
+    )
+    assert res["returncode"] == 0
+    assert set(res["changed"]) == {"keep.txt", "new.txt", "gone.txt"}
+    assert (wd / "keep.txt").read_text() == "EDITED"
+    assert (wd / "new.txt").read_text() == "created"
+    assert not (wd / "gone.txt").exists()
+
+
+def test_run_sandboxed_no_commit_on_container_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: "docker")
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "keep.txt").write_text("original")
+
+    def run(argv):
+        sbx = Path(argv[argv.index("-v") + 1].split(":")[0])
+        (sbx / "keep.txt").write_text("half-done")  # container messed with it then failed
+
+        class P:
+            returncode = 1
+
+        return P()
+
+    res = sandbox.run_sandboxed(str(wd), "x", "gpt-5.1", image="img", runner=run)
+    assert res["returncode"] == 1
+    assert res["changed"] == []
+    assert (wd / "keep.txt").read_text() == "original"  # workspace untouched on failure
+
+
+def test_run_sandboxed_fails_closed_without_runtime(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: None)
+    with pytest.raises(sandbox.SandboxError):
+        sandbox.run_sandboxed(str(tmp_path), "x", "m", image="img", runner=lambda a: None)
+
+
+def test_run_sandboxed_fails_closed_when_runner_returns_no_process(tmp_path, monkeypatch):
+    # A runner that returns None (or anything without .returncode) means the
+    # container never ran; that must fail closed, not commit back as rc=0.
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: "docker")
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "keep.txt").write_text("original")
+    with pytest.raises(sandbox.SandboxError, match="returncode"):
+        sandbox.run_sandboxed(str(wd), "x", "m", image="img", runner=lambda a: None)
+    assert (wd / "keep.txt").read_text() == "original"  # nothing committed
+
+
+def test_run_sandboxed_wraps_staging_error_as_sandbox_error(tmp_path, monkeypatch):
+    # A copy-in failure surfaces as SandboxError (the CLI's fail-closed handler),
+    # not a raw OSError that bypasses it.
+    monkeypatch.setattr(sandbox, "detect_runtime", lambda: "docker")
+
+    def boom(*a, **k):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(sandbox, "_copy_workspace", boom)
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    with pytest.raises(sandbox.SandboxError, match="stage workspace"):
+        sandbox.run_sandboxed(str(wd), "x", "m", image="img", runner=lambda a: None)
+
+
+def test_commit_back_reports_unreadable_sandbox_file(tmp_path, monkeypatch):
+    # A sandbox file whose hash can't be read is reported in `failed`, not skipped
+    # as "unchanged" via a None == None comparison.
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    sbx = tmp_path / "sbx"
+    sbx.mkdir()
+    (sbx / "bad.txt").write_text("x")
+
+    real_hash = sandbox._hash
+
+    def maybe_none(path):
+        return None if path.name == "bad.txt" else real_hash(path)
+
+    monkeypatch.setattr(sandbox, "_hash", maybe_none)
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert failed == ["bad.txt"]
+    assert "bad.txt" not in changed
+    assert not (wd / "bad.txt").exists()
+
+
+def test_commit_back_leaves_ignored_trees_untouched(tmp_path):
+    # A change under an ignored tree in the sandbox must not be copied back.
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    sbx = tmp_path / "sbx"
+    (sbx / ".git").mkdir(parents=True)
+    (sbx / ".git" / "config").write_text("sneaky")
+    (sbx / "real.txt").write_text("ok")
+
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert "real.txt" in changed
+    assert failed == []
+    assert not (wd / ".git").exists()  # ignored tree not committed back
+
+
+def test_commit_back_reports_failed_deletion(tmp_path, monkeypatch):
+    # A delete that can't be performed is reported in `failed`, not silently dropped.
+    wd = tmp_path / "ws"
+    wd.mkdir()
+    (wd / "locked.txt").write_text("x")  # present in real, absent in sandbox -> delete
+    sbx = tmp_path / "sbx"
+    sbx.mkdir()
+
+    import pathlib
+
+    real_unlink = pathlib.Path.unlink
+
+    def boom(self, *a, **k):
+        if self.name == "locked.txt":
+            raise OSError("permission denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", boom)
+    changed, failed = sandbox.commit_back(sbx, wd, IgnoreRules())
+    assert failed == ["locked.txt"]
+    assert "locked.txt" not in changed
+
+
+def test_sandbox_without_prompt_fails_closed(monkeypatch, capsys):
+    # --sandbox with no one-shot prompt must error, not run un-isolated.
+    import sys as _sys
+
+    from opendot import cli
+
+    monkeypatch.setattr(_sys, "argv", ["opendot", "--sandbox", "--repl"])
+
+    class _Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(_sys, "stdin", _Tty())
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == 2
+
+
+def test_cli_sandbox_propagates_container_exit_code(monkeypatch):
+    # A non-zero container exit must become the process exit code so CI/scripting
+    # sees the failure, not a silent success.
+    import sys as _sys
+
+    from opendot import cli
+    from opendot import sandbox as sbx
+
+    monkeypatch.setattr(_sys, "argv", ["opendot", "-p", "do it", "--model", "gpt-5.1", "--sandbox"])
+    monkeypatch.setattr(
+        sbx,
+        "run_sandboxed",
+        lambda *a, **k: {"runtime": "docker", "changed": [], "failed": [], "returncode": 3},
+    )
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == 3
