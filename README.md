@@ -288,9 +288,12 @@ subprocess does (the script run by `python foo.py` is as unknowable as
 `python -c`), and a determined adversary could race a symlink swap. That's why
 interpreters are confirm-first and built-in file writes are contained at open
 time — but the honest framing is that the classifier *explains* why a
-confirmation is prudent; it is not a guarantee against hostile input.
-Kernel-enforced isolation (an overlay/container for unattended runs) would be the
-stronger boundary, and is planned but not yet built
+confirmation is prudent; it is not a guarantee against hostile input. When you
+need a real boundary, `--sandbox` runs the turn inside a container against a
+copy of the workspace and commits only the resulting diff back — kernel-enforced
+containment rather than a heuristic (see the Sandbox mode section above). An
+overlayfs tier for Linux
+hosts without a container runtime is the remaining follow-up
 ([#130](https://github.com/vedaant00/opendot/issues/130)).
 
 **Skipping the snapshot on purpose.** When opendot runs a shell command it
