@@ -92,6 +92,39 @@ def _hash(path: Path) -> str | None:
         return None
 
 
+def _prepare_dest(dst: Path, real_root: Path) -> None:
+    """Make ``dst`` safe to write during commit-back, or raise SandboxError.
+
+    The sandbox is untrusted, so a path it produces must not let commit-back
+    write outside the workspace. Two escapes are closed here:
+
+    - A symlink anywhere in ``dst``'s existing path would make ``shutil.copy2``
+      follow it and write to the link target (possibly outside ``real_root``).
+      Any existing symlink component is removed so the copy lands on a real path.
+    - Even with symlinks gone, the resolved parent must stay under ``real_root``;
+      if it doesn't, we refuse rather than write outside containment.
+    """
+    # Remove an existing symlink (or a symlink standing in for a needed dir) at or
+    # above dst, walking down from real_root, so nothing on the path is followed.
+    for parent in reversed(dst.parents):
+        try:
+            if parent.is_relative_to(real_root) and parent != real_root and parent.is_symlink():
+                parent.unlink()
+        except OSError:
+            pass
+    if dst.is_symlink() or (dst.exists() and dst.is_dir()):
+        # A symlink at dst would be followed by copy2; a dir there blocks the file
+        # write. Neutralize both (the sandbox's view is authoritative on commit).
+        if dst.is_dir() and not dst.is_symlink():
+            shutil.rmtree(dst, ignore_errors=True)
+        else:
+            dst.unlink(missing_ok=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    resolved_parent = dst.parent.resolve()
+    if not (resolved_parent == real_root or resolved_parent.is_relative_to(real_root)):
+        raise SandboxError(f"commit-back destination escapes workspace: {dst}")
+
+
 def commit_back(
     sandbox_dir: Path, workdir: Path, rules: IgnoreRules
 ) -> tuple[list[str], list[str]]:
@@ -109,6 +142,7 @@ def commit_back(
     """
     changed: list[str] = []
     failed: list[str] = []
+    real_root = workdir.resolve()
 
     sandbox_files = {
         f.relative_to(sandbox_dir).as_posix(): f for f in _iter_files(sandbox_dir, rules)
@@ -127,10 +161,10 @@ def commit_back(
         dst_h = _hash(dst) if rel in real_files else None
         if rel not in real_files or src_h != dst_h:
             try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
+                _prepare_dest(dst, real_root)
                 shutil.copy2(src, dst)
                 changed.append(rel)
-            except OSError:
+            except (OSError, SandboxError):
                 failed.append(rel)
 
     # 2. Remove files the sandbox deleted (present in real, absent in sandbox).

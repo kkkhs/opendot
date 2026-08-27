@@ -27,7 +27,12 @@ guarantee must come from a boundary the kernel enforces.
   snapshotted first via the reversibility engine, so it is itself undoable
   (subject to the snapshot size limit for very large files); on a non-zero
   container exit, nothing is applied. Files that can't be reconciled (a copy/
-  delete that raises) are reported, never silently dropped.
+  delete that raises) are reported, never silently dropped. Commit-back treats
+  the sandbox as untrusted: it won't follow a symlink path component out of the
+  workspace (any such link is neutralized, and a destination that still resolves
+  outside the workspace is refused), so a malicious path can't escape containment
+  on the way back. The CLI exits non-zero if the container failed *or* the
+  commit-back was only partial (the workspace is then indeterminate).
 - **Least privilege.** Network off by default (`--network none`, opt in with
   `--sandbox-net`); only the API-key env var the model needs is forwarded.
 - **Scope.** One-shot (`-p`) only — a headless-container TUI/REPL isn't useful.
