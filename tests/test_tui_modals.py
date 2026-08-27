@@ -62,6 +62,15 @@ def test_mcp_header_split_supports_both_input_forms():
     )
 
 
+def test_mcp_header_split_rejects_malformed_headers():
+    # An empty key or a value with no delimiter must not produce an invalid
+    # {"": ...} / keyless header dict; the caller skips ("", "").
+    assert _split_header("=abc") == ("", "")
+    assert _split_header(":abc") == ("", "")
+    assert _split_header("no-delimiter-here") == ("", "")
+    assert _split_header("   ") == ("", "")
+
+
 async def test_mcp_add_modal_preserves_equals_in_authorization_value(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENDOT_HOME", str(tmp_path / "store"))
     app = OpendotTUI(_FakeAgent())
