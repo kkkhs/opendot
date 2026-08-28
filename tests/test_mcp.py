@@ -30,6 +30,29 @@ def test_missing_config_is_empty(tmp_path):
     assert load_mcp_config() == {}
 
 
+def test_save_mcp_config_is_owner_only(tmp_path):
+    from opendot.mcp.manager import load_mcp_config, save_mcp_config
+
+    store = tmp_path / "store"
+    store.mkdir(parents=True)
+    path = store / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    path.chmod(0o644)
+
+    save_mcp_config(
+        {
+            "supabase": {
+                "url": "https://mcp.supabase.com/mcp",
+                "headers": {"Authorization": "Bearer tok123"},
+            }
+        }
+    )
+
+    assert (path.stat().st_mode & 0o777) == 0o600
+    assert load_mcp_config()["supabase"]["headers"]["Authorization"] == "Bearer tok123"
+    assert not any(p.name.endswith(".tmp") for p in store.iterdir())
+
+
 class _FakeMCP:
     """Stand-in MCPManager: exposes one tool, records calls."""
 

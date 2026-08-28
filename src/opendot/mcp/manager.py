@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -61,7 +62,17 @@ def save_mcp_config(servers: dict[str, dict]) -> None:
     """Write the full server map back to ~/.opendot/mcp.json."""
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"mcpServers": servers}, indent=2), encoding="utf-8")
+    payload = json.dumps({"mcpServers": servers}, indent=2).encode("utf-8")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        os.replace(tmp, path)
+        path.chmod(0o600)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def add_mcp_server(name: str, spec: dict) -> None:
