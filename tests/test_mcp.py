@@ -1,6 +1,7 @@
 """Tests for MCP client integration (config, tool exposure, irreversible gating)."""
 
 import json
+import os
 
 import pytest
 
@@ -48,7 +49,10 @@ def test_save_mcp_config_is_owner_only(tmp_path):
         }
     )
 
-    assert (path.stat().st_mode & 0o777) == 0o600
+    # POSIX permission bits are meaningless on Windows; the mode check is the
+    # security guarantee, so gate just that assertion, not the whole test.
+    if os.name == "posix":
+        assert (path.stat().st_mode & 0o777) == 0o600
     assert load_mcp_config()["supabase"]["headers"]["Authorization"] == "Bearer tok123"
     assert not any(p.name.endswith(".tmp") for p in store.iterdir())
 
