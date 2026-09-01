@@ -62,6 +62,12 @@ def save_mcp_config(servers: dict[str, dict]) -> None:
     """Write the full server map back to ~/.opendot/mcp.json."""
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    # A static config can carry Authorization headers, so it must never exist
+    # group/world-readable — not even briefly. Mirror the OAuth token writer:
+    # create a temp file 0600 *from the first byte* (O_CREAT with mode 0o600),
+    # then atomically rename it in. os.replace preserves the temp file's mode, so
+    # no follow-up chmod is needed (and none is wanted — an unguarded chmod can
+    # fail on permission-mapped mounts the creation mode already handles).
     payload = json.dumps({"mcpServers": servers}, indent=2).encode("utf-8")
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -69,7 +75,6 @@ def save_mcp_config(servers: dict[str, dict]) -> None:
         with os.fdopen(fd, "wb") as f:
             f.write(payload)
         os.replace(tmp, path)
-        path.chmod(0o600)
     finally:
         if tmp.exists():
             tmp.unlink()
