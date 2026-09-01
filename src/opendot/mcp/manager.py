@@ -73,13 +73,18 @@ def save_mcp_config(servers: dict[str, dict]) -> None:
     payload = json.dumps({"mcpServers": servers}, indent=2).encode("utf-8")
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
+    replaced = False
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(payload)
         os.replace(tmp, path)
+        replaced = True
     finally:
-        if tmp.exists():
-            tmp.unlink()
+        # Only clean up on failure. After a successful replace the temp name is
+        # freed, and a blind unlink could race and delete an unrelated file that
+        # took that name — so key the cleanup on `replaced`, not tmp.exists().
+        if not replaced:
+            tmp.unlink(missing_ok=True)
 
 
 def add_mcp_server(name: str, spec: dict) -> None:
