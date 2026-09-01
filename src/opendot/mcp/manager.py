@@ -75,7 +75,13 @@ def save_mcp_config(servers: dict[str, dict]) -> None:
     tmp = Path(tmp_name)
     replaced = False
     try:
-        with os.fdopen(fd, "wb") as f:
+        # If fdopen itself fails, the raw fd would leak — close it and re-raise.
+        try:
+            f = os.fdopen(fd, "wb")
+        except OSError:
+            os.close(fd)
+            raise
+        with f:
             f.write(payload)
         os.replace(tmp, path)
         replaced = True
